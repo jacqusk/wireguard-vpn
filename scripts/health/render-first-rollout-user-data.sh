@@ -14,6 +14,7 @@ Usage:
     --output PATH_TO_RENDERED_USER_DATA
 
 Options:
+        --validation-mode first-rollout|none Optional. Defaults to first-rollout
     --mode launcher|full        Optional. Defaults to launcher
     --template PATH_TO_TEMPLATE Optional. Used in full mode. Defaults to scripts/bootstrap/ec2-user-data-wireguard-bootstrap.sh
 
@@ -56,6 +57,7 @@ parse_args() {
     OUTPUT_FILE=""
     TEMPLATE_FILE=""
     RENDER_MODE="launcher"
+    VALIDATION_MODE="first-rollout"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -69,6 +71,10 @@ parse_args() {
                 ;;
             --output)
                 OUTPUT_FILE="$2"
+                shift 2
+                ;;
+            --validation-mode)
+                VALIDATION_MODE="$2"
                 shift 2
                 ;;
             --mode)
@@ -98,6 +104,14 @@ parse_args() {
             ;;
         *)
             fail "--mode must be launcher or full"
+            ;;
+    esac
+
+    case "${VALIDATION_MODE}" in
+        first-rollout|none)
+            ;;
+        *)
+            fail "--validation-mode must be first-rollout or none"
             ;;
     esac
 }
@@ -154,6 +168,7 @@ CLIENT_PUBLIC_KEY	${PRIMARY_PEER_PUBLIC_KEY}
 PRIMARY_CLIENT_NAME	${PRIMARY_CLIENT_NAME}
 PEER_DEFINITIONS	${PEER_DEFINITIONS}
 EGRESS_MODE	${EGRESS_MODE}
+RESIDENTIAL_PROXY_TYPE	${RESIDENTIAL_PROXY_TYPE:-socks5}
 RESIDENTIAL_PROXY_HOST	${RESIDENTIAL_PROXY_HOST:-}
 RESIDENTIAL_PROXY_PORT	${RESIDENTIAL_PROXY_PORT:-}
 RESIDENTIAL_PROXY_USERNAME	${RESIDENTIAL_PROXY_USERNAME:-}
@@ -239,6 +254,7 @@ BOOTSTRAP_SRC_DIR="\${BOOTSTRAP_WORKDIR}/src"
 PRIMARY_CLIENT_NAME="$(escape_for_double_quotes "${PRIMARY_CLIENT_NAME}")"
 PEER_DEFINITIONS="$(escape_for_double_quotes "${PEER_DEFINITIONS}")"
 EGRESS_MODE="$(escape_for_double_quotes "${EGRESS_MODE}")"
+RESIDENTIAL_PROXY_TYPE="$(escape_for_double_quotes "${RESIDENTIAL_PROXY_TYPE:-socks5}")"
 ENABLE_SOCKS5_UDP_SUPPORT="$(escape_for_double_quotes "${ENABLE_SOCKS5_UDP_SUPPORT}")"
 ENABLE_AWS_CONSOLE_EGRESS_SWITCH="$(escape_for_double_quotes "${ENABLE_AWS_CONSOLE_EGRESS_SWITCH}")"
 RESIDENTIAL_PROXY_HOST="$(escape_for_double_quotes "${RESIDENTIAL_PROXY_HOST:-}")"
@@ -262,6 +278,7 @@ fi
 export PRIMARY_CLIENT_NAME
 export PEER_DEFINITIONS
 export EGRESS_MODE
+export RESIDENTIAL_PROXY_TYPE
 export ENABLE_SOCKS5_UDP_SUPPORT
 export ENABLE_AWS_CONSOLE_EGRESS_SWITCH
 export RESIDENTIAL_PROXY_HOST
@@ -303,10 +320,12 @@ main() {
         TEMPLATE_FILE="${repo_root}/scripts/bootstrap/ec2-user-data-wireguard-bootstrap.sh"
     fi
 
-    require_file "${validator_script}"
     require_file "${TEMPLATE_FILE}"
 
-    bash "${validator_script}" --preflight "${PREFLIGHT_FILE}" --user-data "${USER_DATA_FILE}" >/dev/null
+    if [[ "${VALIDATION_MODE}" == "first-rollout" ]]; then
+        require_file "${validator_script}"
+        bash "${validator_script}" --preflight "${PREFLIGHT_FILE}" --user-data "${USER_DATA_FILE}" >/dev/null
+    fi
 
     load_env_file "${PREFLIGHT_FILE}"
     load_env_file "${USER_DATA_FILE}"
@@ -329,6 +348,7 @@ main() {
     echo "Rendered user-data file: ${OUTPUT_FILE}"
     echo "Primary client: ${PRIMARY_CLIENT_NAME} (${PRIMARY_PEER_ADDRESS})"
     echo "Render mode: ${RENDER_MODE}"
+    echo "Validation mode: ${VALIDATION_MODE}"
     if [[ "${RENDER_MODE}" == "full" ]]; then
         echo "Template source: ${TEMPLATE_FILE}"
     else

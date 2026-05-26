@@ -213,6 +213,12 @@ Jesli pracujesz bez SSH i bez SSM, pobierz profil `phone-test-1` z `Get system l
 - podmien `CLIENT_PRIVATE_KEY_GOES_HERE` na prywatny klucz z telefonu,
 - podmien `YOUR_ELASTIC_IP_OR_DNS` na Elastic IP instancji.
 
+Wazne dla `residential-proxy` z `RESIDENTIAL_PROXY_TYPE="http-connect"` i bez UDP relay:
+
+- klient nie powinien miec zwyklego `DNS = 1.1.1.1`, bo DNS po UDP bedzie fail-closed,
+- handshake moze dzialac poprawnie, a internet nadal nie bedzie dzialal tylko przez problem z DNS,
+- do testu uzyj na kliencie DNS over TLS / DNS over HTTPS / Private DNS, czyli rozwiazania opartego o TCP.
+
 Jesli wlaczysz opcjonalny shared profile, serwer wygeneruje dodatkowo plik `/root/wireguard-shared-client.conf`.
 
 Jesli przygotujesz residential proxy, na instancji bedzie tez dostepny helper `/usr/local/sbin/wireguard-egress`.

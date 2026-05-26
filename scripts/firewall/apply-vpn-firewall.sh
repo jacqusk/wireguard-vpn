@@ -97,7 +97,7 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     iptables -t nat -A WG_TCP_PROXY -d 240.0.0.0/4 -j RETURN
     iptables -t nat -A WG_TCP_PROXY -d "${WG_NETWORK_CIDR}" -j RETURN
     iptables -t nat -A WG_TCP_PROXY -d "${RESIDENTIAL_PROXY_IP}/32" -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -j REDIRECT --to-ports "${RESIDENTIAL_PROXY_LOCAL_PORT}"
+    iptables -t nat -A WG_TCP_PROXY -p tcp -j REDIRECT --to-ports "${RESIDENTIAL_PROXY_LOCAL_PORT}"
     iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp -j WG_TCP_PROXY
 else
     # Forward only traffic that arrives from the WireGuard tunnel.

@@ -232,6 +232,22 @@ all_peer_definitions() {
     printf '%s' "${definitions}"
 }
 
+client_template_dns_line() {
+    local peer_dns
+
+    peer_dns="$1"
+
+    if [[ -z "${peer_dns}" ]]; then
+        return 0
+    fi
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        return 0
+    fi
+
+    printf 'DNS = %s\n' "${peer_dns}"
+}
+
 validate_peer_definitions() {
     local definitions
     local peer_entries
@@ -307,6 +323,7 @@ install_packages() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y curl iptables iptables-persistent qrencode redsocks wireguard
+        systemctl disable --now redsocks.service >/dev/null 2>&1 || true
 }
 
 prepare_sysctl() {
@@ -464,6 +481,7 @@ Before=wg-quick@${WG_INTERFACE}.service
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/default/wireguard-firewall
+EnvironmentFile=${EGRESS_ENV_FILE}
 ExecStart=${FIREWALL_TARGET_FILE}
 RemainAfterExit=yes
 
@@ -582,7 +600,7 @@ write_client_templates() {
 [Interface]
 PrivateKey = CLIENT_PRIVATE_KEY_GOES_HERE
 Address = ${peer_address}
-DNS = ${peer_dns}
+    $(client_template_dns_line "${peer_dns}")
 
 [Peer]
 PublicKey = $(cat "${SERVER_PUBLIC_KEY_FILE}")
@@ -656,6 +674,10 @@ print_summary() {
     echo "Egress helper: ${EGRESS_HELPER_TARGET_FILE}"
     echo "Firewall config: /etc/default/wireguard-firewall"
     echo "Egress config: ${EGRESS_ENV_FILE}"
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        echo "DNS note: client UDP DNS is intentionally not configured in tcp-only http-connect mode."
+        echo "DNS note: use encrypted DNS over TCP/TLS/HTTPS on the client if you want name resolution through the tunnel."
+    fi
     echo
     echo "Primary client template content for AWS system log retrieval:"
     echo "-----BEGIN PRIMARY CLIENT TEMPLATE-----"

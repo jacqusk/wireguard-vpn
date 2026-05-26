@@ -136,6 +136,22 @@ all_peer_definitions() {
     printf '%s' "${definitions}"
 }
 
+client_template_dns_line() {
+    local peer_dns
+
+    peer_dns="$1"
+
+    if [[ -z "${peer_dns}" ]]; then
+        return 0
+    fi
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        return 0
+    fi
+
+    printf 'DNS = %s\n' "${peer_dns}"
+}
+
 validate_egress_settings() {
     case "${EGRESS_MODE}" in
         direct|residential-proxy)
@@ -298,6 +314,7 @@ validate_egress_settings
 validate_aws_console_switch_settings
 apt-get update
 apt-get install -y curl iptables iptables-persistent qrencode redsocks wireguard
+systemctl disable --now redsocks.service >/dev/null 2>&1 || true
 
 log "Applying sysctl settings"
 cat > /etc/sysctl.d/99-wireguard-vpn.conf <<EOF
@@ -411,7 +428,7 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     iptables -t nat -A WG_TCP_PROXY -d 240.0.0.0/4 -j RETURN
     iptables -t nat -A WG_TCP_PROXY -d "${WG_NETWORK_CIDR}" -j RETURN
     iptables -t nat -A WG_TCP_PROXY -d "${RESIDENTIAL_PROXY_IP}/32" -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -j REDIRECT --to-ports "${RESIDENTIAL_PROXY_LOCAL_PORT}"
+    iptables -t nat -A WG_TCP_PROXY -p tcp -j REDIRECT --to-ports "${RESIDENTIAL_PROXY_LOCAL_PORT}"
     iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp -j WG_TCP_PROXY
 else
     iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -o "${UPLINK_IFACE}" -j ACCEPT
@@ -516,7 +533,7 @@ base {
 }
 
 redsocks {
-    local_ip = 127.0.0.1;
+    local_ip = 0.0.0.0;
     local_port = ${RESIDENTIAL_PROXY_LOCAL_PORT};
     ip = ${RESIDENTIAL_PROXY_IP};
     port = ${RESIDENTIAL_PROXY_PORT};
@@ -1125,6 +1142,7 @@ Before=wg-quick@${WG_INTERFACE}.service
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/default/wireguard-firewall
+EnvironmentFile=${EGRESS_ENV_FILE}
 ExecStart=${FIREWALL_TARGET_FILE}
 RemainAfterExit=yes
 
@@ -1215,7 +1233,7 @@ for peer_entry in "${peer_entries[@]}"; do
 [Interface]
 PrivateKey = CLIENT_PRIVATE_KEY_GOES_HERE
 Address = ${peer_address}
-DNS = ${peer_dns}
+$(client_template_dns_line "${peer_dns}")
 
 [Peer]
 PublicKey = $(cat "${SERVER_PUBLIC_KEY_FILE}")
@@ -1285,6 +1303,10 @@ if [[ "${ENABLE_SHARED_PROFILE}" == "true" ]]; then
 fi
 if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     log "Residential proxy note: this mode is strict fail-closed. Traffic that cannot use the upstream proxy is blocked instead of leaking through AWS."
+    if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        log "DNS note: client UDP DNS is intentionally not configured in tcp-only http-connect mode."
+        log "DNS note: use encrypted DNS over TCP/TLS/HTTPS on the client if you want name resolution through the tunnel."
+    fi
     if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
         log "UDP relay note: install sing-box config at /etc/sing-box/wg-residential-udp-relay.json, then start wg-residential-udp-relay.service."
     fi

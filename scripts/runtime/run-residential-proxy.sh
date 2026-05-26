@@ -75,7 +75,7 @@ base {
 }
 
 redsocks {
-    local_ip = 127.0.0.1;
+    local_ip = 0.0.0.0;
     local_port = ${RESIDENTIAL_PROXY_LOCAL_PORT};
     ip = ${RESIDENTIAL_PROXY_IP};
     port = ${RESIDENTIAL_PROXY_PORT};
