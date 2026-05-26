@@ -133,6 +133,7 @@ Wybrany wariant wdrozenia:
 9. Uruchom instancje.
 10. Po pierwszym starcie sprawdz `Status checks` instancji.
 11. Jesli potrzebujesz diagnostyki bez logowania, uzyj `Get system log` w AWS Console.
+12. W wariancie bez SSH i bez SSM w `Get system log` szukaj bloku `-----BEGIN PRIMARY CLIENT TEMPLATE-----` do `-----END PRIMARY CLIENT TEMPLATE-----`. Ten blok zawiera gotowy szablon profilu dla `phone-test-1`, razem z `PresharedKey`, ale nadal wymaga podmiany `YOUR_ELASTIC_IP_OR_DNS` na przypisany Elastic IP i wpisania prywatnego klucza wygenerowanego lokalnie na telefonie.
 
 ### Przyklad pierwszego rollouta
 
@@ -206,6 +207,11 @@ Dla pierwszego rollouta masz tez gotowe szablony per-peer:
 Przy wariancie multi-peer szablony klientow beda rowniez wygenerowane osobno w katalogu `/root/wireguard-clients/`.
 
 Dla pierwszego rolloutu oczekuj co najmniej pliku dla `phone-test-1`, a jesli od razu wpisales oba peery, to takze dla `cloud-test-1`.
+
+Jesli pracujesz bez SSH i bez SSM, pobierz profil `phone-test-1` z `Get system log` w AWS Console. Szukaj bloku `-----BEGIN PRIMARY CLIENT TEMPLATE-----` do `-----END PRIMARY CLIENT TEMPLATE-----`, skopiuj go do lokalnego pliku albo bezposrednio do aplikacji WireGuard, a potem:
+
+- podmien `CLIENT_PRIVATE_KEY_GOES_HERE` na prywatny klucz z telefonu,
+- podmien `YOUR_ELASTIC_IP_OR_DNS` na Elastic IP instancji.
 
 Jesli wlaczysz opcjonalny shared profile, serwer wygeneruje dodatkowo plik `/root/wireguard-shared-client.conf`.
 

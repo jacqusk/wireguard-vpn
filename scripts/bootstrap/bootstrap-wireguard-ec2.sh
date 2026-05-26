@@ -656,6 +656,11 @@ print_summary() {
     echo "Egress helper: ${EGRESS_HELPER_TARGET_FILE}"
     echo "Firewall config: /etc/default/wireguard-firewall"
     echo "Egress config: ${EGRESS_ENV_FILE}"
+    echo
+    echo "Primary client template content for AWS system log retrieval:"
+    echo "-----BEGIN PRIMARY CLIENT TEMPLATE-----"
+    cat "${CLIENT_TEMPLATE_FILE}"
+    echo "-----END PRIMARY CLIENT TEMPLATE-----"
     if [[ "${ENABLE_AWS_CONSOLE_EGRESS_SWITCH}" == "true" ]]; then
         echo "AWS tag switch: set ${AWS_EGRESS_TAG_KEY}=direct or residential-proxy in EC2 tags."
     fi
