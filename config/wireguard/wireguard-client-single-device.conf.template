@@ -1,0 +1,17 @@
+[Interface]
+PrivateKey = CLIENT_PRIVATE_KEY_GOES_HERE
+Address = 10.44.0.2/32
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = SERVER_PUBLIC_KEY_GOES_HERE
+PresharedKey = CLIENT_PRESHARED_KEY_GOES_HERE
+Endpoint = YOUR_ELASTIC_IP_OR_DNS:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+
+# Instrukcja uzupelnienia:
+# 1. CLIENT_PRIVATE_KEY_GOES_HERE - prywatny klucz wygenerowany lokalnie na kliencie.
+# 2. SERVER_PUBLIC_KEY_GOES_HERE - publiczny klucz serwera z EC2.
+# 3. CLIENT_PRESHARED_KEY_GOES_HERE - klucz PSK wygenerowany na serwerze.
+# 4. YOUR_ELASTIC_IP_OR_DNS - Elastic IP lub nazwa DNS instancji.

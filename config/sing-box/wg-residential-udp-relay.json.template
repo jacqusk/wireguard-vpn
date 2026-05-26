@@ -1,0 +1,45 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "tproxy",
+      "tag": "tproxy-udp-in",
+      "listen": "::",
+      "listen_port": 12346,
+      "network": "udp",
+      "sniff": false
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "residential-socks5",
+      "server": "UPSTREAM_SOCKS5_HOST",
+      "server_port": 1080,
+      "version": "5",
+      "username": "UPSTREAM_USERNAME",
+      "password": "UPSTREAM_PASSWORD",
+      "udp_over_tcp": false
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": ["tproxy-udp-in"],
+        "outbound": "residential-socks5"
+      }
+    ],
+    "final": "block"
+  }
+}

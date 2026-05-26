@@ -1,0 +1,7 @@
+# Example PEER_DEFINITIONS for the first rollout
+# Replace placeholder public keys with real client public keys generated locally.
+
+phone-test-1|REPLACE_WITH_PHONE_TEST_PUBLIC_KEY|10.44.0.2/32|1.1.1.1;cloud-test-1|REPLACE_WITH_CLOUD_TEST_PUBLIC_KEY|10.44.0.3/32|1.1.1.1
+
+# Lowest-risk single-peer variant:
+# phone-test-1|REPLACE_WITH_PHONE_TEST_PUBLIC_KEY|10.44.0.2/32|1.1.1.1

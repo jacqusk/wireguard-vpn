@@ -1,0 +1,36 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Private keys and certificates
+*.key
+*.pub
+*.psk
+*.pem
+*.p12
+*.crt
+*.csr
+
+# Runtime and generated configs (never commit actual WireGuard keys or live relay configs)
+*.conf
+!config/**/*.conf.template
+
+# Runtime relay configs — live files stay outside the repo
+/etc/sing-box/
+wg-residential-udp-relay.json
+wg-residential-proxy.conf
+
+# Generated artifacts
+generated/
+
+# Logs and local scratch files
+*.log
+*.tmp
+*.bak
+*.swp
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini

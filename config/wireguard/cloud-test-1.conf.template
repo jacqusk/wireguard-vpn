@@ -1,0 +1,14 @@
+[Interface]
+PrivateKey = CLIENT_PRIVATE_KEY_GOES_HERE
+Address = 10.44.0.3/32
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = SERVER_PUBLIC_KEY_GOES_HERE
+PresharedKey = CLIENT_PRESHARED_KEY_GOES_HERE
+Endpoint = YOUR_ELASTIC_IP_OR_DNS:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+
+# Intended second test client for multi-peer validation.
+# Replace the placeholders with values generated during deployment.
