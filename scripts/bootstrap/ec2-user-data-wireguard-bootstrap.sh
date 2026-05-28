@@ -479,7 +479,28 @@ ip route flush table 100 2>/dev/null || true
 
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
-iptables -P OUTPUT ACCEPT
+iptables -P OUTPUT DROP
+
+# OUTPUT whitelist - prevent accidental direct egress from server processes
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -d "${WG_NETWORK_CIDR}" -j ACCEPT
+iptables -A OUTPUT -d 169.254.169.254/32 -j ACCEPT
+
+# Allow DNS to configured upstream only
+if [[ -n "${RESIDENTIAL_DNS_UPSTREAM_IP}" ]]; then
+    iptables -A OUTPUT -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p udp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p tcp --dport 53 -j ACCEPT
+fi
+
+# Allow connection to residential proxy
+if [[ -n "${RESIDENTIAL_PROXY_IP}" ]]; then
+    iptables -A OUTPUT -d "${RESIDENTIAL_PROXY_IP}/32" -j ACCEPT
+fi
+
+# Allow AWS SSM agent (TCP 443 to VPC and AWS service endpoints)
+# This is the minimal compromise needed for remote management
+iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
 
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
