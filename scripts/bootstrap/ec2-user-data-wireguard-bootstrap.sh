@@ -25,7 +25,7 @@ RESIDENTIAL_PROXY_PORT=""
 RESIDENTIAL_PROXY_USERNAME=""
 RESIDENTIAL_PROXY_PASSWORD=""
 RESIDENTIAL_PROXY_LOCAL_PORT="12345"
-RESIDENTIAL_DNS_UPSTREAM_IP="54.72.70.84"
+# DNS is handled by local dnscrypt-proxy (DoH) - no external DNS server needed
 ENABLE_SOCKS5_UDP_SUPPORT="false"
 RESIDENTIAL_PROXY_UDP_LOCAL_PORT="12346"
 ENABLE_AWS_CONSOLE_EGRESS_SWITCH="false"
@@ -202,6 +202,64 @@ client_template_dns_line() {
     printf 'DNS = %s\n' "${dns_value}"
 }
 
+configure_dnscrypt_proxy() {
+    local dnscrypt_config_file
+
+    dnscrypt_config_file="/etc/dnscrypt-proxy/dnscrypt-proxy.toml"
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        mkdir -p /var/cache/dnscrypt-proxy
+
+        cat > "${dnscrypt_config_file}" <<'DNSCRYPT_EOF'
+# dnscrypt-proxy configuration for DoH
+# DNS traffic exits via redsocks proxy (port 443)
+
+listen_addresses = ['127.0.0.1:5353']
+max_clients = 50
+
+# Only use DoH servers, disable legacy DNSCrypt
+ipv4_servers = true
+ipv6_servers = false
+dnscrypt_servers = false
+doh_servers = true
+
+# Privacy settings
+require_dnssec = false
+require_nolog = true
+require_nofilter = true
+
+# Force TCP so all DNS queries go through redsocks
+force_tcp = true
+
+# Timeouts
+timeout = 5000
+keepalive = 30
+
+# Use multiple providers for redundancy
+server_names = ['cloudflare', 'google']
+fallback_resolver = '1.1.1.1:53'
+ignore_system_dns = true
+
+# Caching - reduce upstream queries
+cache = true
+cache_size = 512
+cache_min_ttl = 600
+cache_max_ttl = 86400
+
+[sources]
+  [sources.'public-resolvers']
+  urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md']
+  cache_file = '/var/cache/dnscrypt-proxy/public-resolvers.md'
+  minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
+DNSCRYPT_EOF
+
+        systemctl enable dnscrypt-proxy
+        systemctl restart dnscrypt-proxy
+    else
+        systemctl disable --now dnscrypt-proxy >/dev/null 2>&1 || true
+    fi
+}
+
 configure_local_dns_listener() {
     local resolved_dropin_dir
     local resolved_dropin_file
@@ -211,9 +269,10 @@ configure_local_dns_listener() {
 
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
         install -d -m 755 "${resolved_dropin_dir}"
+        # Use local dnscrypt-proxy DoH resolver (traffic exits via redsocks on port 443)
         cat > "${resolved_dropin_file}" <<EOF
 [Resolve]
-DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
+DNS=127.0.0.1:5353
 FallbackDNS=
 Domains=~.
 DNSOverTLS=no
@@ -386,8 +445,9 @@ validate_peer_definitions
 validate_egress_settings
 validate_aws_console_switch_settings
 apt-get update
-apt-get install -y curl iptables iptables-persistent qrencode redsocks wireguard
+apt-get install -y curl iptables iptables-persistent qrencode redsocks wireguard dnscrypt-proxy
 systemctl disable --now redsocks.service >/dev/null 2>&1 || true
+systemctl disable --now dnscrypt-proxy.service >/dev/null 2>&1 || true
 
 log "Applying sysctl settings"
 cat > /etc/sysctl.d/99-wireguard-vpn.conf <<EOF
@@ -454,8 +514,8 @@ ENABLE_SOCKS5_UDP_SUPPORT="${ENABLE_SOCKS5_UDP_SUPPORT:-false}"
 RESIDENTIAL_PROXY_IP="${RESIDENTIAL_PROXY_IP:-}"
 RESIDENTIAL_PROXY_PORT="${RESIDENTIAL_PROXY_PORT:-}"
 RESIDENTIAL_PROXY_LOCAL_PORT="${RESIDENTIAL_PROXY_LOCAL_PORT:-12345}"
-RESIDENTIAL_DNS_UPSTREAM_IP="${RESIDENTIAL_DNS_UPSTREAM_IP:-54.72.70.84}"
 RESIDENTIAL_PROXY_UDP_LOCAL_PORT="${RESIDENTIAL_PROXY_UDP_LOCAL_PORT:-12346}"
+# DNS is handled by local dnscrypt-proxy (DoH) - no external DNS server needed
 
 if [[ -f "${EGRESS_ENV_FILE}" ]]; then
     # shellcheck disable=SC1090
@@ -486,12 +546,6 @@ iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -d "${WG_NETWORK_CIDR}" -j ACCEPT
 iptables -A OUTPUT -d 169.254.169.254/32 -j ACCEPT
-
-# Allow DNS to configured upstream only
-if [[ -n "${RESIDENTIAL_DNS_UPSTREAM_IP}" ]]; then
-    iptables -A OUTPUT -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p udp --dport 53 -j ACCEPT
-    iptables -A OUTPUT -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p tcp --dport 53 -j ACCEPT
-fi
 
 # Allow connection to residential proxy
 if [[ -n "${RESIDENTIAL_PROXY_IP}" ]]; then
@@ -529,7 +583,7 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
         iptables -N WG_BLOCK_EXTERNAL_DNS
         iptables -A WG_BLOCK_EXTERNAL_DNS -d 127.0.0.0/8 -j RETURN
         iptables -A WG_BLOCK_EXTERNAL_DNS -d "${WG_NETWORK_CIDR}" -j RETURN
-        iptables -A WG_BLOCK_EXTERNAL_DNS -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -j RETURN
+        # DNS handled by local dnscrypt-proxy (DoH via port 443 through redsocks)
         iptables -A WG_BLOCK_EXTERNAL_DNS -p udp --dport 53 -j REJECT
         iptables -A WG_BLOCK_EXTERNAL_DNS -p tcp --dport 53 -j REJECT
         iptables -A OUTPUT -j WG_BLOCK_EXTERNAL_DNS
@@ -1038,9 +1092,10 @@ configure_runtime_local_dns_listener() {
         fi
 
         install -d -m 755 "${resolved_dropin_dir}"
+        # Use local dnscrypt-proxy DoH resolver (traffic exits via redsocks on port 443)
         cat > "${resolved_dropin_file}" <<RESOLVED_CONF_EOF
 [Resolve]
-DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
+DNS=127.0.0.1:5353
 FallbackDNS=
 Domains=~.
 DNSOverTLS=no
@@ -1168,7 +1223,7 @@ print_status() {
     echo "UDP local redirect port: ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}"
 
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        echo "DNS upstream mode: systemd-resolved -> ${RESIDENTIAL_DNS_UPSTREAM_IP}"
+        echo "DNS upstream mode: systemd-resolved -> dnscrypt-proxy (DoH via redsocks)"
     fi
 
     if systemctl is-active --quiet "${PROXY_SERVICE}"; then
@@ -1682,6 +1737,7 @@ if [[ "${found_primary}" != "true" ]]; then
     exit 1
 fi
 
+configure_dnscrypt_proxy
 configure_local_dns_listener
 
 log "Enabling services"
