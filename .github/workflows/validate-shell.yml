@@ -23,3 +23,7 @@ jobs:
       - name: Run shell smoke validation
         run: |
           bash tests/smoke/validate-shell-scripts.sh
+
+      - name: Run first-rollout smoke validation
+        run: |
+          bash tests/smoke/validate-first-rollout-examples.sh

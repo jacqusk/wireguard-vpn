@@ -172,6 +172,12 @@ Skrypt:
 - ustawia automatyczny start po restarcie,
 - tworzy osobne szablony konfiguracji klientow.
 
+Na instancji dzialaja tez watchery systemd dla zmian konfiguracji:
+
+- zmiana `/etc/default/wireguard-egress` automatycznie przeladowuje firewall i usluge proxy,
+- zmiana `/etc/wireguard/wg0.conf` automatycznie wykonuje reload interfejsu WireGuard,
+- przy zwyklych zmianach konfiguracyjnych nie potrzeba recznego `systemctl restart` dla tych uslug.
+
 ## Weryfikacja po wdrozeniu
 
 Na serwerze sprawdz:
@@ -278,7 +284,7 @@ Typowe akcje:
 
 1. `Start instance` - gdy chcesz korzystac z VPN.
 2. `Stop instance` - gdy chcesz ograniczyc koszty.
-3. `Reboot instance` - gdy potrzebny jest restart.
+3. `Reboot instance` - glownie dla restartu calej instancji albo po zmianach systemowych, nie dla zwyklych zmian w `wg0.conf` czy `/etc/default/wireguard-egress`.
 4. Sprawdzenie `Instance state checks` i podstawowego statusu.
 
 ## Uwagi kosztowe
