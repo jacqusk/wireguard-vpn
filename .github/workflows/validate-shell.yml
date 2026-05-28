@@ -8,15 +8,18 @@ on:
   pull_request:
 
 jobs:
-  bash-syntax:
+  shell-validation:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate bash syntax
+      - name: Install ShellCheck
         run: |
           set -euo pipefail
-          find scripts -type f -name '*.sh' -print0 | while IFS= read -r -d '' file; do
-            bash -n "$file"
-          done
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run shell smoke validation
+        run: |
+          bash tests/smoke/validate-shell-scripts.sh

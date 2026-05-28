@@ -33,6 +33,7 @@ AWS_EGRESS_TAG_KEY="wireguard-egress-mode"
 AWS_EGRESS_SYNC_INTERVAL_SECONDS="30"
 
 WIREGUARD_DIR="/etc/wireguard"
+WG_CONFIG_FILE="${WIREGUARD_DIR}/${WG_INTERFACE}.conf"
 SERVER_PRIVATE_KEY_FILE="${WIREGUARD_DIR}/server.key"
 SERVER_PUBLIC_KEY_FILE="${WIREGUARD_DIR}/server.pub"
 FIREWALL_TARGET_FILE="/usr/local/sbin/apply-vpn-firewall.sh"
@@ -1575,6 +1576,7 @@ Description=Watch for wireguard-egress config changes
 
 [Path]
 PathModified=${EGRESS_ENV_FILE}
+PathChanged=${EGRESS_ENV_FILE}
 
 [Install]
 WantedBy=multi-user.target
@@ -1588,6 +1590,27 @@ Description=Reload firewall after egress config change
 Type=oneshot
 ExecStart=${FIREWALL_TARGET_FILE}
 ExecStart=/bin/systemctl restart wg-residential-proxy.service
+EOF
+
+cat > /etc/systemd/system/wireguard-interface-config.path <<EOF
+[Unit]
+Description=Watch for WireGuard interface config changes
+
+[Path]
+PathModified=${WG_CONFIG_FILE}
+PathChanged=${WG_CONFIG_FILE}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/wireguard-interface-config.service <<EOF
+[Unit]
+Description=Reload WireGuard interface after config change
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'wg syncconf ${WG_INTERFACE} <(wg-quick strip ${WG_CONFIG_FILE})'
 EOF
 
 log "Writing client templates"
@@ -1673,6 +1696,7 @@ fi
 systemctl enable "wg-quick@${WG_INTERFACE}"
 systemctl start "wg-quick@${WG_INTERFACE}"
 systemctl enable --now wireguard-egress-config.path
+systemctl enable --now wireguard-interface-config.path
 systemctl restart systemd-resolved >/dev/null 2>&1 || true
 
 log "Bootstrap completed"
