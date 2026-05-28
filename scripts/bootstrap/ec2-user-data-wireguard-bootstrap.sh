@@ -561,6 +561,13 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     iptables -t nat -A WG_TCP_PROXY -d "${RESIDENTIAL_PROXY_IP}/32" -j RETURN
     iptables -t nat -A WG_TCP_PROXY -p tcp -j REDIRECT --to-ports "${RESIDENTIAL_PROXY_LOCAL_PORT}"
     iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp -j WG_TCP_PROXY
+
+    # Redirect all DNS queries from clients to configured upstream
+    # This allows any DNS setting on client (10.44.0.1, 8.8.8.8, etc.) to work
+    if [[ -n "${RESIDENTIAL_DNS_UPSTREAM_IP}" ]]; then
+        iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -p udp --dport 53 -j DNAT --to-destination "${RESIDENTIAL_DNS_UPSTREAM_IP}:53"
+        iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -p tcp --dport 53 -j DNAT --to-destination "${RESIDENTIAL_DNS_UPSTREAM_IP}:53"
+    fi
 else
     iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -o "${UPLINK_IFACE}" -j ACCEPT
     iptables -A FORWARD -i "${UPLINK_IFACE}" -d "${WG_NETWORK_CIDR}" -o "${WG_INTERFACE}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT

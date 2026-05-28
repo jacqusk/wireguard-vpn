@@ -6,22 +6,27 @@ When using a residential proxy for geolocation purposes, **DNS must match the pr
 DNS leak tests check which DNS servers resolve your queries - if they're in a different country 
 than your apparent IP, it reveals your actual location.
 
-## Architecture: Client-Side DNS
+## Architecture: Transparent DNS Redirect
 
-DNS is configured **on the client** (in WireGuard profile), not on the server:
+The server intercepts **all DNS queries** from WireGuard clients and redirects them to 
+the configured upstream DNS:
 
 ```
-Client (DNS=54.72.70.84) → WireGuard tunnel → Server FORWARD → MASQUERADE → 54.72.70.84
+Client (any DNS setting) → WireGuard → NAT DNAT → 54.72.70.84 → MASQUERADE → Internet
 ```
+
+This means the client can have:
+- `DNS = 54.72.70.84` (direct, recommended)
+- `DNS = 10.44.0.1` (server IP, redirected)
+- `DNS = 8.8.8.8` (Google, redirected)
+- No DNS setting (uses system default, redirected)
+
+All DNS traffic is forced through the configured `RESIDENTIAL_DNS_UPSTREAM_IP`.
 
 Benefits:
-- No local DNS resolver needed on server
-- DNS IP is explicit in client config (easy to audit/change)
-- Server only forwards, doesn't intercept
-- Works with any client that respects WireGuard DNS setting
-
-The server allows DNS forwarding only to the configured `RESIDENTIAL_DNS_UPSTREAM_IP` 
-and blocks DNS to any other destination.
+- Works with any client DNS configuration
+- Impossible to leak DNS to wrong servers
+- Server enforces DNS policy transparently
 
 ## Why DoH (DNS-over-HTTPS) Doesn't Work for Geolocation
 
