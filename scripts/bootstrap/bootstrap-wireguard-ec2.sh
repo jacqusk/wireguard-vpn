@@ -651,6 +651,29 @@ WantedBy=timers.target
 EOF
 }
 
+write_config_watcher_units() {
+    cat > /etc/systemd/system/wireguard-egress-config.path <<EOF
+[Unit]
+Description=Watch for wireguard-egress config changes
+
+[Path]
+PathModified=${EGRESS_ENV_FILE}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    cat > /etc/systemd/system/wireguard-egress-config.service <<EOF
+[Unit]
+Description=Reload firewall after egress config change
+
+[Service]
+Type=oneshot
+ExecStart=${FIREWALL_TARGET_FILE}
+ExecStart=/bin/systemctl restart wg-residential-proxy.service
+EOF
+}
+
 write_client_templates() {
     local definitions
     local peer_entries
@@ -754,6 +777,7 @@ start_services() {
     fi
     systemctl enable "wg-quick@${WG_INTERFACE}"
     systemctl restart "wg-quick@${WG_INTERFACE}"
+    systemctl enable --now wireguard-egress-config.path
     systemctl restart systemd-resolved >/dev/null 2>&1 || true
 }
 
@@ -819,6 +843,7 @@ main() {
     write_proxy_healthcheck_units
     write_udp_proxy_systemd_service
     write_aws_console_sync_units
+    write_config_watcher_units
     write_client_templates
     start_services
     print_summary

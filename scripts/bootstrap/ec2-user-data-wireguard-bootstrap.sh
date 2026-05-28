@@ -1568,6 +1568,28 @@ Unit=wg-egress-aws-sync.service
 WantedBy=timers.target
 EOF
 
+log "Writing config watcher units"
+cat > /etc/systemd/system/wireguard-egress-config.path <<EOF
+[Unit]
+Description=Watch for wireguard-egress config changes
+
+[Path]
+PathModified=${EGRESS_ENV_FILE}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/wireguard-egress-config.service <<EOF
+[Unit]
+Description=Reload firewall after egress config change
+
+[Service]
+Type=oneshot
+ExecStart=${FIREWALL_TARGET_FILE}
+ExecStart=/bin/systemctl restart wg-residential-proxy.service
+EOF
+
 log "Writing client templates"
 install -d -m 700 "${CLIENT_TEMPLATE_DIR}"
 primary_template_name="$(sanitize_peer_name "${PRIMARY_CLIENT_NAME}")"
@@ -1650,6 +1672,7 @@ else
 fi
 systemctl enable "wg-quick@${WG_INTERFACE}"
 systemctl start "wg-quick@${WG_INTERFACE}"
+systemctl enable --now wireguard-egress-config.path
 systemctl restart systemd-resolved >/dev/null 2>&1 || true
 
 log "Bootstrap completed"
