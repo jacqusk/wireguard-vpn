@@ -358,9 +358,36 @@ net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
 net.netfilter.nf_conntrack_max = 262144
+
+# Small-instance memory tuning
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
 EOF
 
     sysctl --system >/dev/null
+}
+
+configure_small_instance_memory() {
+    local swap_file
+
+    swap_file="/swapfile"
+
+    systemctl disable --now snapd.service snapd.socket snapd.seeded.service multipathd.service multipathd.socket fwupd.service fwupd-refresh.service fwupd-refresh.timer ModemManager.service udisks2.service >/dev/null 2>&1 || true
+    systemctl mask snapd.service snapd.socket snapd.seeded.service multipathd.service multipathd.socket fwupd.service fwupd-refresh.service fwupd-refresh.timer ModemManager.service udisks2.service >/dev/null 2>&1 || true
+
+    if ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq "${swap_file}"; then
+        if [[ ! -f "${swap_file}" ]]; then
+            fallocate -l 512M "${swap_file}" 2>/dev/null || dd if=/dev/zero of="${swap_file}" bs=1M count=512 status=none
+            chmod 600 "${swap_file}"
+            mkswap "${swap_file}" >/dev/null
+        fi
+
+        swapon "${swap_file}"
+    fi
+
+    if ! grep -Eq '^[^#]+[[:space:]]+/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]' /etc/fstab; then
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
 }
 
 generate_keys() {
@@ -801,6 +828,7 @@ main() {
     validate_aws_console_switch_settings
     install_packages
     prepare_sysctl
+    configure_small_instance_memory
     generate_keys
     install_firewall_script
     install_egress_scripts

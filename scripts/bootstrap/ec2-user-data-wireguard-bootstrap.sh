@@ -407,8 +407,28 @@ net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_mtu_probing = 1
 net.netfilter.nf_conntrack_max = 262144
+
+# Small-instance memory tuning
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
 EOF
 sysctl --system >/dev/null
+
+log "Configuring small-instance memory headroom"
+systemctl disable --now snapd.service snapd.socket snapd.seeded.service multipathd.service multipathd.socket fwupd.service fwupd-refresh.service fwupd-refresh.timer ModemManager.service udisks2.service >/dev/null 2>&1 || true
+systemctl mask snapd.service snapd.socket snapd.seeded.service multipathd.service multipathd.socket fwupd.service fwupd-refresh.service fwupd-refresh.timer ModemManager.service udisks2.service >/dev/null 2>&1 || true
+if ! swapon --show=NAME --noheadings 2>/dev/null | grep -Fxq /swapfile; then
+    if [[ ! -f /swapfile ]]; then
+        fallocate -l 512M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=512 status=none
+        chmod 600 /swapfile
+        mkswap /swapfile >/dev/null
+    fi
+
+    swapon /swapfile
+fi
+if ! grep -Eq '^[^#]+[[:space:]]+/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]' /etc/fstab; then
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
 log "Generating server keys"
 install -d -m 700 "${WIREGUARD_DIR}"
