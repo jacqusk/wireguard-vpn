@@ -25,7 +25,7 @@ RESIDENTIAL_PROXY_PORT="${RESIDENTIAL_PROXY_PORT:-}"
 RESIDENTIAL_PROXY_USERNAME="${RESIDENTIAL_PROXY_USERNAME:-}"
 RESIDENTIAL_PROXY_PASSWORD="${RESIDENTIAL_PROXY_PASSWORD:-}"
 RESIDENTIAL_PROXY_LOCAL_PORT="${RESIDENTIAL_PROXY_LOCAL_PORT:-12345}"
-# DNS is handled by local dnscrypt-proxy (DoH) - no external DNS server needed
+RESIDENTIAL_DNS_UPSTREAM_IP="${RESIDENTIAL_DNS_UPSTREAM_IP:-54.72.70.84}"
 ENABLE_SOCKS5_UDP_SUPPORT="${ENABLE_SOCKS5_UDP_SUPPORT:-false}"
 RESIDENTIAL_PROXY_UDP_LOCAL_PORT="${RESIDENTIAL_PROXY_UDP_LOCAL_PORT:-12346}"
 ENABLE_AWS_CONSOLE_EGRESS_SWITCH="${ENABLE_AWS_CONSOLE_EGRESS_SWITCH:-false}"
@@ -336,9 +336,8 @@ ensure_peer_psk() {
 install_packages() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y curl iptables iptables-persistent qrencode redsocks wireguard dnscrypt-proxy
+    apt-get install -y curl iptables iptables-persistent qrencode redsocks wireguard
         systemctl disable --now redsocks.service >/dev/null 2>&1 || true
-        systemctl disable --now dnscrypt-proxy.service >/dev/null 2>&1 || true
 }
 
 prepare_sysctl() {
@@ -483,64 +482,6 @@ EOF
     chmod 600 "${AWS_EGRESS_SYNC_ENV_FILE}"
 }
 
-configure_dnscrypt_proxy() {
-    local dnscrypt_config_file
-
-    dnscrypt_config_file="/etc/dnscrypt-proxy/dnscrypt-proxy.toml"
-
-    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        mkdir -p /var/cache/dnscrypt-proxy
-
-        cat > "${dnscrypt_config_file}" <<'DNSCRYPT_EOF'
-# dnscrypt-proxy configuration for DoH
-# DNS traffic exits via redsocks proxy (port 443)
-
-listen_addresses = ['127.0.0.1:5353']
-max_clients = 50
-
-# Only use DoH servers, disable legacy DNSCrypt
-ipv4_servers = true
-ipv6_servers = false
-dnscrypt_servers = false
-doh_servers = true
-
-# Privacy settings
-require_dnssec = false
-require_nolog = true
-require_nofilter = true
-
-# Force TCP so all DNS queries go through redsocks
-force_tcp = true
-
-# Timeouts
-timeout = 5000
-keepalive = 30
-
-# Use multiple providers for redundancy
-server_names = ['cloudflare', 'google']
-fallback_resolver = '1.1.1.1:53'
-ignore_system_dns = true
-
-# Caching - reduce upstream queries
-cache = true
-cache_size = 512
-cache_min_ttl = 600
-cache_max_ttl = 86400
-
-[sources]
-  [sources.'public-resolvers']
-  urls = ['https://raw.githubusercontent.com/DNSCrypt/dnscrypt-resolvers/master/v3/public-resolvers.md']
-  cache_file = '/var/cache/dnscrypt-proxy/public-resolvers.md'
-  minisign_key = 'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3'
-DNSCRYPT_EOF
-
-        systemctl enable dnscrypt-proxy
-        systemctl restart dnscrypt-proxy
-    else
-        systemctl disable --now dnscrypt-proxy >/dev/null 2>&1 || true
-    fi
-}
-
 configure_local_dns_listener() {
     local resolved_dropin_dir
     local resolved_dropin_file
@@ -550,10 +491,9 @@ configure_local_dns_listener() {
 
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
         install -d -m 755 "${resolved_dropin_dir}"
-        # Use local dnscrypt-proxy DoH resolver (traffic exits via redsocks on port 443)
         cat > "${resolved_dropin_file}" <<EOF
 [Resolve]
-DNS=127.0.0.1:5353
+DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
 FallbackDNS=
 Domains=~.
 DNSOverTLS=no
@@ -855,7 +795,7 @@ print_summary() {
     echo "Egress config: ${EGRESS_ENV_FILE}"
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
         echo "DNS note: client DNS is pinned to $(server_address_ip) in tcp-only http-connect mode."
-        echo "DNS note: the server uses dnscrypt-proxy DoH resolver (DNS traffic exits via redsocks on port 443)."
+        echo "DNS note: the server exposes a local resolver on port 53 and forwards upstream DNS to ${RESIDENTIAL_DNS_UPSTREAM_IP}."
         echo "Proxy note: a health timer checks the local transparent proxy every 30 seconds."
     fi
     echo
@@ -895,7 +835,6 @@ main() {
     write_firewall_environment
     write_egress_environment
     write_aws_console_switch_environment
-    configure_dnscrypt_proxy
     configure_local_dns_listener
     write_wireguard_config
     write_systemd_service

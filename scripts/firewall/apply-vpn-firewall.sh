@@ -14,8 +14,8 @@ ENABLE_SOCKS5_UDP_SUPPORT="${ENABLE_SOCKS5_UDP_SUPPORT:-false}"
 RESIDENTIAL_PROXY_IP="${RESIDENTIAL_PROXY_IP:-}"
 RESIDENTIAL_PROXY_PORT="${RESIDENTIAL_PROXY_PORT:-}"
 RESIDENTIAL_PROXY_LOCAL_PORT="${RESIDENTIAL_PROXY_LOCAL_PORT:-12345}"
+RESIDENTIAL_DNS_UPSTREAM_IP="${RESIDENTIAL_DNS_UPSTREAM_IP:-54.72.70.84}"
 RESIDENTIAL_PROXY_UDP_LOCAL_PORT="${RESIDENTIAL_PROXY_UDP_LOCAL_PORT:-12346}"
-# DNS is handled locally by dnscrypt-proxy (DoH) - no external DNS server needed
 
 if [[ -f "${EGRESS_ENV_FILE}" ]]; then
     # shellcheck disable=SC1090
@@ -47,6 +47,12 @@ iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -d "${WG_NETWORK_CIDR}" -j ACCEPT
 iptables -A OUTPUT -d 169.254.169.254/32 -j ACCEPT
+
+# Allow DNS to configured upstream only
+if [[ -n "${RESIDENTIAL_DNS_UPSTREAM_IP}" ]]; then
+    iptables -A OUTPUT -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p udp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p tcp --dport 53 -j ACCEPT
+fi
 
 # Allow connection to residential proxy
 if [[ -n "${RESIDENTIAL_PROXY_IP}" ]]; then
@@ -84,7 +90,7 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
         iptables -N WG_BLOCK_EXTERNAL_DNS
         iptables -A WG_BLOCK_EXTERNAL_DNS -d 127.0.0.0/8 -j RETURN
         iptables -A WG_BLOCK_EXTERNAL_DNS -d "${WG_NETWORK_CIDR}" -j RETURN
-        # DNS handled by local dnscrypt-proxy (DoH via port 443 through redsocks)
+        iptables -A WG_BLOCK_EXTERNAL_DNS -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -j RETURN
         iptables -A WG_BLOCK_EXTERNAL_DNS -p udp --dport 53 -j REJECT
         iptables -A WG_BLOCK_EXTERNAL_DNS -p tcp --dport 53 -j REJECT
         iptables -A OUTPUT -j WG_BLOCK_EXTERNAL_DNS
