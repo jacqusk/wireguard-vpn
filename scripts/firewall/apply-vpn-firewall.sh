@@ -27,133 +27,195 @@ if [[ -z "${UPLINK_IFACE}" ]]; then
     exit 1
 fi
 
-# Reset IPv4 rules so the policy can be re-applied idempotently.
-iptables -F
-iptables -t nat -F
-iptables -t mangle -F
-iptables -X
-iptables -t nat -X
-iptables -t mangle -X
+reset_policy_routing() {
+    while ip rule del fwmark 0x1/0x1 lookup 100 2>/dev/null; do :; done
+    ip route flush table 100 2>/dev/null || true
+}
 
-while ip rule del fwmark 0x1/0x1 lookup 100 2>/dev/null; do :; done
-ip route flush table 100 2>/dev/null || true
-
-iptables -P INPUT DROP
-iptables -P FORWARD DROP
-iptables -P OUTPUT DROP
-
-# OUTPUT whitelist - prevent accidental direct egress from server processes
-iptables -A OUTPUT -o lo -j ACCEPT
-iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A OUTPUT -d "${WG_NETWORK_CIDR}" -j ACCEPT
-iptables -A OUTPUT -d 169.254.169.254/32 -j ACCEPT
-
-# Allow DNS to any server (needed for forwarding client DNS requests)
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-
-# Allow connection to residential proxy
-if [[ -n "${RESIDENTIAL_PROXY_IP}" ]]; then
-    iptables -A OUTPUT -d "${RESIDENTIAL_PROXY_IP}/32" -j ACCEPT
-fi
-
-# Allow AWS SSM agent (TCP 443 to VPC and AWS service endpoints)
-# This is the minimal compromise needed for remote management
-iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
-
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -p udp --dport "${WG_PORT}" -j ACCEPT
-
-if [[ -n "${ALLOW_SSH_CIDR}" ]]; then
-    iptables -A INPUT -p tcp -s "${ALLOW_SSH_CIDR}" --dport 22 -j ACCEPT
-fi
-
-if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
-    if [[ -z "${RESIDENTIAL_PROXY_IP}" || -z "${RESIDENTIAL_PROXY_PORT}" ]]; then
-        echo "Residential proxy mode requires RESIDENTIAL_PROXY_IP and RESIDENTIAL_PROXY_PORT." >&2
-        exit 1
-    fi
-
-    if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" && "${RESIDENTIAL_PROXY_TYPE}" != "socks5" ]]; then
-        echo "UDP support requires RESIDENTIAL_PROXY_TYPE=socks5." >&2
-        exit 1
-    fi
-
-    iptables -A INPUT -i "${WG_INTERFACE}" -p tcp --dport "${RESIDENTIAL_PROXY_LOCAL_PORT}" -j ACCEPT
-    # DNS is forwarded to whatever server client specifies - no server-side restriction
-    if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
-        iptables -A INPUT -i "${WG_INTERFACE}" -p udp --dport "${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}" -j ACCEPT
-
-        # Transparent UDP interception needs a separate local relay listening on
-        # RESIDENTIAL_PROXY_UDP_LOCAL_PORT with TPROXY support.
-        iptables -t mangle -N WG_UDP_PROXY
-        iptables -t mangle -A WG_UDP_PROXY -d 0.0.0.0/8 -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -d 10.0.0.0/8 -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -d 127.0.0.0/8 -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -d 169.254.0.0/16 -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -d 172.16.0.0/12 -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -d 192.168.0.0/16 -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -d 224.0.0.0/4 -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -d 240.0.0.0/4 -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -d "${WG_NETWORK_CIDR}" -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -d "${RESIDENTIAL_PROXY_IP}/32" -j RETURN
-        iptables -t mangle -A WG_UDP_PROXY -p udp -j TPROXY --on-port "${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}" --tproxy-mark 0x1/0x1
-        iptables -t mangle -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p udp -j WG_UDP_PROXY
-
+configure_policy_routing() {
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
         ip rule add fwmark 0x1/0x1 lookup 100
         ip route add local 0.0.0.0/0 dev lo table 100
     fi
+}
 
-    iptables -A FORWARD -i "${UPLINK_IFACE}" -d "${WG_NETWORK_CIDR}" -o "${WG_INTERFACE}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+emit_filter_rules() {
+    cat <<EOF
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT DROP [0:0]
+-A OUTPUT -o lo -j ACCEPT
+-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A OUTPUT -d ${WG_NETWORK_CIDR} -j ACCEPT
+-A OUTPUT -d 169.254.169.254/32 -j ACCEPT
+-A OUTPUT -p udp --dport 53 -j ACCEPT
+-A OUTPUT -p tcp --dport 53 -j ACCEPT
+EOF
 
-    # Allow DNS forwarding to any server (client controls DNS choice)
-    if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p udp --dport 53 -j ACCEPT
-        iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp --dport 53 -j ACCEPT
-        iptables -t nat -A POSTROUTING -s "${WG_NETWORK_CIDR}" -p udp --dport 53 -o "${UPLINK_IFACE}" -j MASQUERADE
-        iptables -t nat -A POSTROUTING -s "${WG_NETWORK_CIDR}" -p tcp --dport 53 -o "${UPLINK_IFACE}" -j MASQUERADE
+    if [[ -n "${RESIDENTIAL_PROXY_IP}" ]]; then
+        echo "-A OUTPUT -d ${RESIDENTIAL_PROXY_IP}/32 -j ACCEPT"
     fi
 
-    # Reject forwarded traffic from wg0 clients explicitly so they fail fast instead of timing out.
-    # TCP (e.g. connections to blocked relay CIDRs) gets an immediate RST.
-    # Everything else (UDP STUN/QUIC, ICMP) gets ICMP admin-prohibited.
-    iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp -j REJECT --reject-with tcp-reset
-    iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -j REJECT --reject-with icmp-admin-prohibited
+    cat <<EOF
+-A OUTPUT -p tcp --dport 443 -j ACCEPT
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A INPUT -p udp --dport ${WG_PORT} -j ACCEPT
+EOF
 
-    iptables -t nat -N WG_TCP_PROXY
-    iptables -t nat -A WG_TCP_PROXY -d 0.0.0.0/8 -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -d 10.0.0.0/8 -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -d 127.0.0.0/8 -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -d 169.254.0.0/16 -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -d 172.16.0.0/12 -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -d 192.168.0.0/16 -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -d 224.0.0.0/4 -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -d 240.0.0.0/4 -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -d "${WG_NETWORK_CIDR}" -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -d "${RESIDENTIAL_PROXY_IP}/32" -j RETURN
-    iptables -t nat -A WG_TCP_PROXY -p tcp -j REDIRECT --to-ports "${RESIDENTIAL_PROXY_LOCAL_PORT}"
-    iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp -j WG_TCP_PROXY
-else
-    # Forward only traffic that arrives from the WireGuard tunnel.
-    iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -o "${UPLINK_IFACE}" -j ACCEPT
-    iptables -A FORWARD -i "${UPLINK_IFACE}" -d "${WG_NETWORK_CIDR}" -o "${WG_INTERFACE}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    if [[ -n "${ALLOW_SSH_CIDR}" ]]; then
+        echo "-A INPUT -p tcp -s ${ALLOW_SSH_CIDR} --dport 22 -j ACCEPT"
+    fi
 
-    # NAT client traffic so outbound requests use the AWS public IP.
-    iptables -t nat -A POSTROUTING -s "${WG_NETWORK_CIDR}" -o "${UPLINK_IFACE}" -j MASQUERADE
-fi
+    if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
+        if [[ -z "${RESIDENTIAL_PROXY_IP}" || -z "${RESIDENTIAL_PROXY_PORT}" ]]; then
+            echo "Residential proxy mode requires RESIDENTIAL_PROXY_IP and RESIDENTIAL_PROXY_PORT." >&2
+            exit 1
+        fi
 
-# Hide intermediate hops from traceroute-style commands returning to the client.
-iptables -A FORWARD -o "${WG_INTERFACE}" -p icmp --icmp-type time-exceeded -j DROP
+        if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" && "${RESIDENTIAL_PROXY_TYPE}" != "socks5" ]]; then
+            echo "UDP support requires RESIDENTIAL_PROXY_TYPE=socks5." >&2
+            exit 1
+        fi
 
-# Keep IPv6 disabled to avoid accidental egress leaks outside the IPv4-only tunnel.
-if command -v ip6tables >/dev/null 2>&1; then
-    ip6tables -F
-    ip6tables -X
-    ip6tables -P INPUT DROP
-    ip6tables -P FORWARD DROP
-    ip6tables -P OUTPUT DROP
-fi
+        cat <<EOF
+-A INPUT -i ${WG_INTERFACE} -p tcp --dport ${RESIDENTIAL_PROXY_LOCAL_PORT} -j ACCEPT
+-A FORWARD -i ${UPLINK_IFACE} -d ${WG_NETWORK_CIDR} -o ${WG_INTERFACE} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+EOF
+
+        if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
+            echo "-A INPUT -i ${WG_INTERFACE} -p udp --dport ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT} -j ACCEPT"
+        fi
+
+        if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+            cat <<EOF
+-A FORWARD -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -p udp --dport 53 -j ACCEPT
+-A FORWARD -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -p tcp --dport 53 -j ACCEPT
+EOF
+        fi
+
+        cat <<EOF
+-A FORWARD -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -p tcp -j REJECT --reject-with tcp-reset
+-A FORWARD -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -j REJECT --reject-with icmp-admin-prohibited
+EOF
+    else
+        cat <<EOF
+-A FORWARD -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -o ${UPLINK_IFACE} -j ACCEPT
+-A FORWARD -i ${UPLINK_IFACE} -d ${WG_NETWORK_CIDR} -o ${WG_INTERFACE} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+EOF
+    fi
+
+    cat <<EOF
+-A FORWARD -o ${WG_INTERFACE} -p icmp --icmp-type time-exceeded -j DROP
+COMMIT
+EOF
+}
+
+emit_nat_rules() {
+    cat <<EOF
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+EOF
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
+        cat <<EOF
+:WG_TCP_PROXY - [0:0]
+EOF
+
+        if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+            cat <<EOF
+-A POSTROUTING -s ${WG_NETWORK_CIDR} -p udp --dport 53 -o ${UPLINK_IFACE} -j MASQUERADE
+-A POSTROUTING -s ${WG_NETWORK_CIDR} -p tcp --dport 53 -o ${UPLINK_IFACE} -j MASQUERADE
+EOF
+        fi
+
+        cat <<EOF
+-A WG_TCP_PROXY -d 0.0.0.0/8 -j RETURN
+-A WG_TCP_PROXY -d 10.0.0.0/8 -j RETURN
+-A WG_TCP_PROXY -d 127.0.0.0/8 -j RETURN
+-A WG_TCP_PROXY -d 169.254.0.0/16 -j RETURN
+-A WG_TCP_PROXY -d 172.16.0.0/12 -j RETURN
+-A WG_TCP_PROXY -d 192.168.0.0/16 -j RETURN
+-A WG_TCP_PROXY -d 224.0.0.0/4 -j RETURN
+-A WG_TCP_PROXY -d 240.0.0.0/4 -j RETURN
+-A WG_TCP_PROXY -d ${WG_NETWORK_CIDR} -j RETURN
+-A WG_TCP_PROXY -d ${RESIDENTIAL_PROXY_IP}/32 -j RETURN
+-A WG_TCP_PROXY -p tcp -j REDIRECT --to-ports ${RESIDENTIAL_PROXY_LOCAL_PORT}
+-A PREROUTING -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -p tcp -j WG_TCP_PROXY
+EOF
+    else
+        echo "-A POSTROUTING -s ${WG_NETWORK_CIDR} -o ${UPLINK_IFACE} -j MASQUERADE"
+    fi
+
+    echo "COMMIT"
+}
+
+emit_mangle_rules() {
+    cat <<EOF
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+EOF
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
+        cat <<EOF
+:WG_UDP_PROXY - [0:0]
+-A WG_UDP_PROXY -d 0.0.0.0/8 -j RETURN
+-A WG_UDP_PROXY -d 10.0.0.0/8 -j RETURN
+-A WG_UDP_PROXY -d 127.0.0.0/8 -j RETURN
+-A WG_UDP_PROXY -d 169.254.0.0/16 -j RETURN
+-A WG_UDP_PROXY -d 172.16.0.0/12 -j RETURN
+-A WG_UDP_PROXY -d 192.168.0.0/16 -j RETURN
+-A WG_UDP_PROXY -d 224.0.0.0/4 -j RETURN
+-A WG_UDP_PROXY -d 240.0.0.0/4 -j RETURN
+-A WG_UDP_PROXY -d ${WG_NETWORK_CIDR} -j RETURN
+-A WG_UDP_PROXY -d ${RESIDENTIAL_PROXY_IP}/32 -j RETURN
+-A WG_UDP_PROXY -p udp -j TPROXY --on-port ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT} --tproxy-mark 0x1/0x1
+-A PREROUTING -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -p udp -j WG_UDP_PROXY
+EOF
+    fi
+
+    echo "COMMIT"
+}
+
+apply_ipv4_rules() {
+    local rules_file
+
+    rules_file="$(mktemp)"
+
+    {
+        emit_filter_rules
+        emit_nat_rules
+        emit_mangle_rules
+    } > "${rules_file}"
+
+    iptables-restore < "${rules_file}"
+    rm -f "${rules_file}"
+}
+
+apply_ipv6_policy() {
+    if command -v ip6tables-restore >/dev/null 2>&1; then
+        cat <<'EOF' | ip6tables-restore
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT DROP [0:0]
+COMMIT
+EOF
+    fi
+}
+
+reset_policy_routing
+apply_ipv4_rules
+configure_policy_routing
+apply_ipv6_policy
 
 install -d -m 700 /etc/iptables
 iptables-save > /etc/iptables/rules.v4

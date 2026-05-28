@@ -64,7 +64,7 @@ Praktyczna sekwencja:
 
 ```bash
 bash scripts/health/render-first-rollout-user-data.sh \
-	--validation-mode none \
+	--validation-mode proxy-cutover \
 	--preflight generated/proxy-cutover-preflight.local.env \
 	--user-data generated/proxy-cutover-user-data.local.env \
 	--output generated/ec2-user-data-proxy-cutover.local.sh
@@ -100,12 +100,16 @@ Do tego etapu potrzebujesz jeszcze:
 
 ## Uwaga o obecnych helperach walidacyjnych
 
-`scripts/health/validate-first-rollout-inputs.sh` jest nadal nastawiony na rollout `direct-only`. Dlatego renderer dla proxy cutovera powinien byc uruchamiany z `--validation-mode none`, bo inaczej z definicji oczekuje:
+Repo ma teraz osobny validator `scripts/health/validate-residential-proxy-cutover-inputs.sh` i renderer moze byc uruchamiany z `--validation-mode proxy-cutover`.
 
-- `EGRESS_MODE="direct"`,
-- `ENABLE_SOCKS5_UDP_SUPPORT="false"`.
+Ten validator sprawdza miedzy innymi:
 
-Do proxy cutovera traktuj render user-data i sam bootstrap jako glowny punkt walidacji, a nie ten konkretny validator pierwszego rollouta.
+- `EGRESS_MODE="residential-proxy"`,
+- wymagane `RESIDENTIAL_PROXY_*`,
+- zgodnosc ustawien UDP relay z typem proxy,
+- spojnosci peerow i plikow preflight/user-data.
+
+Do proxy cutovera nadal traktuj render user-data i sam bootstrap jako glowny punkt walidacji, ale nie trzeba juz obchodzic walidacji przez `none`.
 
 ## Rollback
 

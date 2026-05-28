@@ -135,6 +135,8 @@ Wybrany wariant wdrozenia:
 11. Jesli potrzebujesz diagnostyki bez logowania, uzyj `Get system log` w AWS Console.
 12. W wariancie bez SSH i bez SSM w `Get system log` szukaj bloku `-----BEGIN PRIMARY CLIENT TEMPLATE-----` do `-----END PRIMARY CLIENT TEMPLATE-----`. Ten blok zawiera gotowy szablon profilu dla `phone-test-1`, razem z `PresharedKey`, ale nadal wymaga podmiany `YOUR_ELASTIC_IP_OR_DNS` na przypisany Elastic IP i wpisania prywatnego klucza wygenerowanego lokalnie na telefonie.
 
+Ten plik `user-data` jest teraz cienkim launcherem: pobiera archiwum repo i uruchamia [bootstrap-wireguard-ec2.sh](../../scripts/bootstrap/bootstrap-wireguard-ec2.sh). Jesli zrodlo ma byc inne niz publiczny GitHub branch archive, ustaw na gorze pliku `DEPLOYMENT_SOURCE_URL` albo zmien `TARGET_GITHUB_OWNER`, `TARGET_GITHUB_REPO`, `TARGET_GITHUB_BRANCH`.
+
 ### Przyklad pierwszego rollouta
 
 Bezpieczny minimalny pierwszy rollout moze wygladac tak:

@@ -671,8 +671,11 @@ Description=Reload firewall after egress config change
 
 [Service]
 Type=oneshot
-ExecStart=${FIREWALL_TARGET_FILE}
-ExecStart=/bin/systemctl restart wg-residential-proxy.service
+Environment=ENV_FILE=${EGRESS_ENV_FILE}
+Environment=FIREWALL_SERVICE=wg-firewall.service
+Environment=PROXY_SERVICE=wg-residential-proxy.service
+Environment=UDP_PROXY_SERVICE=wg-residential-udp-relay.service
+ExecStart=${EGRESS_HELPER_TARGET_FILE} apply
 EOF
 
     cat > /etc/systemd/system/wireguard-interface-config.path <<EOF

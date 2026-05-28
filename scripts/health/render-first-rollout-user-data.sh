@@ -14,7 +14,7 @@ Usage:
     --output PATH_TO_RENDERED_USER_DATA
 
 Options:
-        --validation-mode first-rollout|none Optional. Defaults to first-rollout
+    --validation-mode first-rollout|proxy-cutover|none Optional. Defaults to first-rollout
     --mode launcher|full        Optional. Defaults to launcher
     --template PATH_TO_TEMPLATE Optional. Used in full mode. Defaults to scripts/bootstrap/ec2-user-data-wireguard-bootstrap.sh
 
@@ -108,10 +108,10 @@ parse_args() {
     esac
 
     case "${VALIDATION_MODE}" in
-        first-rollout|none)
+        first-rollout|proxy-cutover|none)
             ;;
         *)
-            fail "--validation-mode must be first-rollout or none"
+            fail "--validation-mode must be first-rollout, proxy-cutover, or none"
             ;;
     esac
 }
@@ -314,7 +314,7 @@ main() {
 
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     repo_root="$(cd "${script_dir}/../.." && pwd)"
-    validator_script="${script_dir}/validate-first-rollout-inputs.sh"
+    validator_script=""
 
     if [[ -z "${TEMPLATE_FILE}" ]]; then
         TEMPLATE_FILE="${repo_root}/scripts/bootstrap/ec2-user-data-wireguard-bootstrap.sh"
@@ -322,7 +322,16 @@ main() {
 
     require_file "${TEMPLATE_FILE}"
 
-    if [[ "${VALIDATION_MODE}" == "first-rollout" ]]; then
+    case "${VALIDATION_MODE}" in
+        first-rollout)
+            validator_script="${script_dir}/validate-first-rollout-inputs.sh"
+            ;;
+        proxy-cutover)
+            validator_script="${script_dir}/validate-residential-proxy-cutover-inputs.sh"
+            ;;
+    esac
+
+    if [[ -n "${validator_script}" ]]; then
         require_file "${validator_script}"
         bash "${validator_script}" --preflight "${PREFLIGHT_FILE}" --user-data "${USER_DATA_FILE}" >/dev/null
     fi

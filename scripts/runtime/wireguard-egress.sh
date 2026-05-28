@@ -172,6 +172,17 @@ apply_services() {
     systemctl restart systemd-resolved
 }
 
+apply_current_mode() {
+    load_env
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
+        validate_proxy_settings
+    fi
+
+    apply_services
+    echo "Egress configuration applied."
+}
+
 print_status() {
     load_env
 
@@ -304,6 +315,7 @@ usage() {
 Usage:
   wireguard-egress status
         wireguard-egress configure --host HOST --port PORT [--type socks5|http-connect] [--username USER] [--password PASS] [--local-port PORT] [--enable-udp true|false] [--udp-local-port PORT]
+    wireguard-egress apply
   wireguard-egress enable
   wireguard-egress disable
   wireguard-egress remove
@@ -330,6 +342,10 @@ case "${command_name}" in
         require_root
         shift
         configure_proxy "$@"
+        ;;
+    apply)
+        require_root
+        apply_current_mode
         ;;
     enable)
         require_root
