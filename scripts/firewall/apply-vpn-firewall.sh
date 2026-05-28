@@ -84,24 +84,14 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
 
     iptables -A INPUT -i "${WG_INTERFACE}" -p tcp --dport "${RESIDENTIAL_PROXY_LOCAL_PORT}" -j ACCEPT
     if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        iptables -A INPUT -i "${WG_INTERFACE}" -p udp --dport 53 -j ACCEPT
-        iptables -A INPUT -i "${WG_INTERFACE}" -p tcp --dport 53 -j ACCEPT
-
+        # DNS is handled by client directly connecting to RESIDENTIAL_DNS_UPSTREAM_IP
+        # Server only forwards DNS traffic, no local resolver needed
+        # Block DNS to any destination except the configured upstream
         iptables -N WG_BLOCK_EXTERNAL_DNS
-        iptables -A WG_BLOCK_EXTERNAL_DNS -d 127.0.0.0/8 -j RETURN
-        iptables -A WG_BLOCK_EXTERNAL_DNS -d "${WG_NETWORK_CIDR}" -j RETURN
         iptables -A WG_BLOCK_EXTERNAL_DNS -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -j RETURN
         iptables -A WG_BLOCK_EXTERNAL_DNS -p udp --dport 53 -j REJECT
         iptables -A WG_BLOCK_EXTERNAL_DNS -p tcp --dport 53 -j REJECT
         iptables -A OUTPUT -j WG_BLOCK_EXTERNAL_DNS
-
-        # Intercept TCP DNS from wg0 clients to any external resolver and force it through
-        # systemd-resolved on this host.  Without this a client could bypass the controlled
-        # resolver by sending DNS over TCP, which would be transparently proxied onward.
-        # UDP DNS to external resolvers is caught by the FORWARD REJECT below, but redirect
-        # it here too so clients with a hardcoded resolver still get answers.
-        iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p udp --dport 53 -j REDIRECT --to-ports 53
-        iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp --dport 53 -j REDIRECT --to-ports 53
     fi
     if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
         iptables -A INPUT -i "${WG_INTERFACE}" -p udp --dport "${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}" -j ACCEPT
@@ -127,6 +117,15 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     fi
 
     iptables -A FORWARD -i "${UPLINK_IFACE}" -d "${WG_NETWORK_CIDR}" -o "${WG_INTERFACE}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    # Allow DNS forwarding to configured upstream (client has DNS=RESIDENTIAL_DNS_UPSTREAM_IP)
+    if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" && -n "${RESIDENTIAL_DNS_UPSTREAM_IP}" ]]; then
+        iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p udp --dport 53 -j ACCEPT
+        iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p tcp --dport 53 -j ACCEPT
+        iptables -t nat -A POSTROUTING -s "${WG_NETWORK_CIDR}" -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p udp --dport 53 -o "${UPLINK_IFACE}" -j MASQUERADE
+        iptables -t nat -A POSTROUTING -s "${WG_NETWORK_CIDR}" -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p tcp --dport 53 -o "${UPLINK_IFACE}" -j MASQUERADE
+    fi
+
     # Reject forwarded traffic from wg0 clients explicitly so they fail fast instead of timing out.
     # TCP (e.g. connections to blocked relay CIDRs) gets an immediate RST.
     # Everything else (UDP STUN/QUIC, ICMP) gets ICMP admin-prohibited.

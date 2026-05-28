@@ -6,6 +6,23 @@ When using a residential proxy for geolocation purposes, **DNS must match the pr
 DNS leak tests check which DNS servers resolve your queries - if they're in a different country 
 than your apparent IP, it reveals your actual location.
 
+## Architecture: Client-Side DNS
+
+DNS is configured **on the client** (in WireGuard profile), not on the server:
+
+```
+Client (DNS=54.72.70.84) → WireGuard tunnel → Server FORWARD → MASQUERADE → 54.72.70.84
+```
+
+Benefits:
+- No local DNS resolver needed on server
+- DNS IP is explicit in client config (easy to audit/change)
+- Server only forwards, doesn't intercept
+- Works with any client that respects WireGuard DNS setting
+
+The server allows DNS forwarding only to the configured `RESIDENTIAL_DNS_UPSTREAM_IP` 
+and blocks DNS to any other destination.
+
 ## Why DoH (DNS-over-HTTPS) Doesn't Work for Geolocation
 
 We evaluated using dnscrypt-proxy with DoH providers (Cloudflare, Google) to eliminate 
@@ -23,35 +40,6 @@ the hardcoded DNS IP dependency. **This approach fails for geolocation purposes:
 3. **Result**: DNS leak tests show Frankfurt DNS servers, revealing the proxy uses 
    German infrastructure even though the IP geolocates to Ireland.
 
-### Technical Details
-
-```
-DoH Request Flow:
-Client → WireGuard → dnscrypt-proxy → HTTPS → redsocks → proxy (AS3320)
-                                                           ↓
-                                              Cloudflare sees AS3320
-                                                           ↓
-                                              Routes to Frankfurt edge
-                                                           ↓
-                                              DNS leak shows German servers
-```
-
-### The Solution
-
-Use the proxy provider's DNS server (RESIDENTIAL_DNS_UPSTREAM_IP):
-- Located in the same region as the proxy endpoint
-- Ensures DNS servers match proxy geolocation
-- No anycast routing issues
-
-```
-Current DNS Flow:
-Client → WireGuard → iptables REDIRECT → systemd-resolved (10.44.0.1)
-                                                ↓
-                                        54.72.70.84 (Ireland)
-                                                ↓
-                                        DNS leak shows Irish servers
-```
-
 ## Configuration
 
 The DNS upstream is configured via `RESIDENTIAL_DNS_UPSTREAM_IP` environment variable:
@@ -60,9 +48,9 @@ The DNS upstream is configured via `RESIDENTIAL_DNS_UPSTREAM_IP` environment var
 RESIDENTIAL_DNS_UPSTREAM_IP="54.72.70.84"  # Proxy provider's Irish DNS
 ```
 
-This is set in `/etc/default/wireguard-egress` and used by:
-- `apply-vpn-firewall.sh` - allows OUTPUT to this IP on port 53
-- `systemd-resolved` - uses this as upstream DNS server
+This is used by:
+- `apply-vpn-firewall.sh` - allows FORWARD to this IP on port 53, blocks other DNS
+- `client_template_dns_line()` - sets DNS in WireGuard client profiles
 
 ## Future Considerations
 

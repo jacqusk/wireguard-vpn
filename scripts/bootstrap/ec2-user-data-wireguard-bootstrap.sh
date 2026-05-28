@@ -195,34 +195,13 @@ client_template_dns_line() {
 
     dns_value="${peer_dns}"
 
+    # In http-connect mode, force DNS to the configured upstream IP
+    # Client connects directly, server only forwards the traffic
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        dns_value="$(server_address_ip)"
+        dns_value="${RESIDENTIAL_DNS_UPSTREAM_IP}"
     fi
 
     printf 'DNS = %s\n' "${dns_value}"
-}
-
-configure_local_dns_listener() {
-    local resolved_dropin_dir
-    local resolved_dropin_file
-
-    resolved_dropin_dir="/etc/systemd/resolved.conf.d"
-    resolved_dropin_file="${resolved_dropin_dir}/99-wireguard-local-dns.conf"
-
-    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        install -d -m 755 "${resolved_dropin_dir}"
-        cat > "${resolved_dropin_file}" <<EOF
-[Resolve]
-DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
-FallbackDNS=
-Domains=~.
-DNSOverTLS=no
-DNSStubListener=yes
-DNSStubListenerExtra=$(server_address_ip)
-EOF
-    else
-        rm -f "${resolved_dropin_file}"
-    fi
 }
 
 validate_egress_settings() {
@@ -523,24 +502,14 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
 
     iptables -A INPUT -i "${WG_INTERFACE}" -p tcp --dport "${RESIDENTIAL_PROXY_LOCAL_PORT}" -j ACCEPT
     if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        iptables -A INPUT -i "${WG_INTERFACE}" -p udp --dport 53 -j ACCEPT
-        iptables -A INPUT -i "${WG_INTERFACE}" -p tcp --dport 53 -j ACCEPT
-
+        # DNS is handled by client directly connecting to RESIDENTIAL_DNS_UPSTREAM_IP
+        # Server only forwards DNS traffic, no local resolver needed
+        # Block DNS to any destination except the configured upstream
         iptables -N WG_BLOCK_EXTERNAL_DNS
-        iptables -A WG_BLOCK_EXTERNAL_DNS -d 127.0.0.0/8 -j RETURN
-        iptables -A WG_BLOCK_EXTERNAL_DNS -d "${WG_NETWORK_CIDR}" -j RETURN
         iptables -A WG_BLOCK_EXTERNAL_DNS -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -j RETURN
         iptables -A WG_BLOCK_EXTERNAL_DNS -p udp --dport 53 -j REJECT
         iptables -A WG_BLOCK_EXTERNAL_DNS -p tcp --dport 53 -j REJECT
         iptables -A OUTPUT -j WG_BLOCK_EXTERNAL_DNS
-
-        # Intercept TCP DNS from wg0 clients to any external resolver and force it through
-        # systemd-resolved on this host.  Without this a client could bypass the controlled
-        # resolver by sending DNS over TCP, which would be transparently proxied onward.
-        # UDP DNS to external resolvers is caught by the FORWARD REJECT below, but redirect
-        # it here too so clients with a hardcoded resolver still get answers.
-        iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p udp --dport 53 -j REDIRECT --to-ports 53
-        iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp --dport 53 -j REDIRECT --to-ports 53
     fi
     if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
         iptables -A INPUT -i "${WG_INTERFACE}" -p udp --dport "${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}" -j ACCEPT
@@ -564,6 +533,15 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     fi
 
     iptables -A FORWARD -i "${UPLINK_IFACE}" -d "${WG_NETWORK_CIDR}" -o "${WG_INTERFACE}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    # Allow DNS forwarding to configured upstream (client has DNS=RESIDENTIAL_DNS_UPSTREAM_IP)
+    if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" && -n "${RESIDENTIAL_DNS_UPSTREAM_IP}" ]]; then
+        iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p udp --dport 53 -j ACCEPT
+        iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p tcp --dport 53 -j ACCEPT
+        iptables -t nat -A POSTROUTING -s "${WG_NETWORK_CIDR}" -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p udp --dport 53 -o "${UPLINK_IFACE}" -j MASQUERADE
+        iptables -t nat -A POSTROUTING -s "${WG_NETWORK_CIDR}" -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -p tcp --dport 53 -o "${UPLINK_IFACE}" -j MASQUERADE
+    fi
+
     # Reject forwarded traffic from wg0 clients explicitly so they fail fast instead of timing out.
     # TCP (e.g. connections to blocked relay CIDRs) gets an immediate RST.
     # Everything else (UDP STUN/QUIC, ICMP) gets ICMP admin-prohibited.
@@ -1021,37 +999,6 @@ server_runtime_address_ip() {
     ip -4 -o addr show dev "${WG_INTERFACE}" | awk 'NR == 1 {print $4}' | cut -d/ -f1
 }
 
-configure_runtime_local_dns_listener() {
-    local resolved_dropin_dir
-    local resolved_dropin_file
-    local local_dns_ip
-
-    resolved_dropin_dir="/etc/systemd/resolved.conf.d"
-    resolved_dropin_file="${resolved_dropin_dir}/99-wireguard-local-dns.conf"
-
-    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        local_dns_ip="$(server_runtime_address_ip)"
-
-        if [[ -z "${local_dns_ip}" ]]; then
-            echo "Unable to determine ${WG_INTERFACE} IPv4 address for local DNS listener." >&2
-            exit 1
-        fi
-
-        install -d -m 755 "${resolved_dropin_dir}"
-        cat > "${resolved_dropin_file}" <<RESOLVED_CONF_EOF
-[Resolve]
-DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
-FallbackDNS=
-Domains=~.
-DNSOverTLS=no
-DNSStubListener=yes
-DNSStubListenerExtra=${local_dns_ip}
-RESOLVED_CONF_EOF
-    else
-        rm -f "${resolved_dropin_file}"
-    fi
-}
-
 write_env() {
     install -d -m 755 "$(dirname "${ENV_FILE}")"
 
@@ -1134,7 +1081,6 @@ udp_relay_ready() {
 
 apply_services() {
     systemctl daemon-reload
-    configure_runtime_local_dns_listener
 
     if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
         systemctl enable "${PROXY_SERVICE}" >/dev/null
@@ -1168,7 +1114,7 @@ print_status() {
     echo "UDP local redirect port: ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}"
 
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        echo "DNS upstream mode: systemd-resolved -> ${RESIDENTIAL_DNS_UPSTREAM_IP}"
+        echo "DNS mode: client -> forward -> ${RESIDENTIAL_DNS_UPSTREAM_IP}"
     fi
 
     if systemctl is-active --quiet "${PROXY_SERVICE}"; then
@@ -1681,8 +1627,6 @@ if [[ "${found_primary}" != "true" ]]; then
     log "PRIMARY_CLIENT_NAME ${PRIMARY_CLIENT_NAME} was not found in PEER_DEFINITIONS."
     exit 1
 fi
-
-configure_local_dns_listener
 
 log "Enabling services"
 systemctl daemon-reload

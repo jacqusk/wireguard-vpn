@@ -69,37 +69,6 @@ server_address_ip() {
     ip -4 -o addr show dev "${WG_INTERFACE}" | awk 'NR == 1 {print $4}' | cut -d/ -f1
 }
 
-configure_local_dns_listener() {
-    local resolved_dropin_dir
-    local resolved_dropin_file
-    local local_dns_ip
-
-    resolved_dropin_dir="/etc/systemd/resolved.conf.d"
-    resolved_dropin_file="${resolved_dropin_dir}/99-wireguard-local-dns.conf"
-
-    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        local_dns_ip="$(server_address_ip)"
-
-        if [[ -z "${local_dns_ip}" ]]; then
-            echo "Unable to determine ${WG_INTERFACE} IPv4 address for local DNS listener." >&2
-            exit 1
-        fi
-
-        install -d -m 755 "${resolved_dropin_dir}"
-        cat > "${resolved_dropin_file}" <<EOF
-[Resolve]
-DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
-FallbackDNS=
-Domains=~.
-DNSOverTLS=no
-DNSStubListener=yes
-DNSStubListenerExtra=${local_dns_ip}
-EOF
-    else
-        rm -f "${resolved_dropin_file}"
-    fi
-}
-
 write_env() {
     install -d -m 755 "$(dirname "${ENV_FILE}")"
 
@@ -183,7 +152,6 @@ udp_relay_ready() {
 
 apply_services() {
     systemctl daemon-reload
-    configure_local_dns_listener
 
     if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
         systemctl enable "${PROXY_SERVICE}" >/dev/null
@@ -217,7 +185,7 @@ print_status() {
     echo "UDP local redirect port: ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}"
 
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        echo "DNS upstream mode: systemd-resolved -> ${RESIDENTIAL_DNS_UPSTREAM_IP}"
+        echo "DNS mode: client -> forward -> ${RESIDENTIAL_DNS_UPSTREAM_IP}"
     fi
 
     if systemctl is-active --quiet "${PROXY_SERVICE}"; then

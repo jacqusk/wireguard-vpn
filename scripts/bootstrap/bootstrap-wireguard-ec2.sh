@@ -255,8 +255,10 @@ client_template_dns_line() {
 
     dns_value="${peer_dns}"
 
+    # In http-connect mode, force DNS to the configured upstream IP
+    # Client connects directly, server only forwards the traffic
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        dns_value="$(server_address_ip)"
+        dns_value="${RESIDENTIAL_DNS_UPSTREAM_IP}"
     fi
 
     printf 'DNS = %s\n' "${dns_value}"
@@ -480,29 +482,6 @@ AWS_EGRESS_TAG_KEY="$(escape_env_value "${AWS_EGRESS_TAG_KEY}")"
 EOF
 
     chmod 600 "${AWS_EGRESS_SYNC_ENV_FILE}"
-}
-
-configure_local_dns_listener() {
-    local resolved_dropin_dir
-    local resolved_dropin_file
-
-    resolved_dropin_dir="/etc/systemd/resolved.conf.d"
-    resolved_dropin_file="${resolved_dropin_dir}/99-wireguard-local-dns.conf"
-
-    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        install -d -m 755 "${resolved_dropin_dir}"
-        cat > "${resolved_dropin_file}" <<EOF
-[Resolve]
-DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
-FallbackDNS=
-Domains=~.
-DNSOverTLS=no
-DNSStubListener=yes
-DNSStubListenerExtra=$(server_address_ip)
-EOF
-    else
-        rm -f "${resolved_dropin_file}"
-    fi
 }
 
 write_wireguard_config() {
@@ -794,8 +773,7 @@ print_summary() {
     echo "Firewall config: /etc/default/wireguard-firewall"
     echo "Egress config: ${EGRESS_ENV_FILE}"
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        echo "DNS note: client DNS is pinned to $(server_address_ip) in tcp-only http-connect mode."
-        echo "DNS note: the server exposes a local resolver on port 53 and forwards upstream DNS to ${RESIDENTIAL_DNS_UPSTREAM_IP}."
+        echo "DNS note: client DNS is set to ${RESIDENTIAL_DNS_UPSTREAM_IP} (forwarded by server, not proxied)."
         echo "Proxy note: a health timer checks the local transparent proxy every 30 seconds."
     fi
     echo
@@ -835,7 +813,6 @@ main() {
     write_firewall_environment
     write_egress_environment
     write_aws_console_switch_environment
-    configure_local_dns_listener
     write_wireguard_config
     write_systemd_service
     write_proxy_systemd_service
