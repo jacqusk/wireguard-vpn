@@ -4,6 +4,7 @@ set -euo pipefail
 
 WG_INTERFACE="${WG_INTERFACE:-wg0}"
 WG_PORT="${WG_PORT:-51820}"
+WG_TUNNEL_MTU="${WG_TUNNEL_MTU:-1380}"
 WG_NETWORK_CIDR="${WG_NETWORK_CIDR:-10.44.0.0/24}"
 SERVER_ADDRESS_CIDR="${SERVER_ADDRESS_CIDR:-10.44.0.1/24}"
 CLIENT_ADDRESS_CIDR="${CLIENT_ADDRESS_CIDR:-10.44.0.2/32}"
@@ -24,6 +25,7 @@ RESIDENTIAL_PROXY_PORT="${RESIDENTIAL_PROXY_PORT:-}"
 RESIDENTIAL_PROXY_USERNAME="${RESIDENTIAL_PROXY_USERNAME:-}"
 RESIDENTIAL_PROXY_PASSWORD="${RESIDENTIAL_PROXY_PASSWORD:-}"
 RESIDENTIAL_PROXY_LOCAL_PORT="${RESIDENTIAL_PROXY_LOCAL_PORT:-12345}"
+RESIDENTIAL_DNS_UPSTREAM_IP="${RESIDENTIAL_DNS_UPSTREAM_IP:-54.72.70.84}"
 ENABLE_SOCKS5_UDP_SUPPORT="${ENABLE_SOCKS5_UDP_SUPPORT:-false}"
 RESIDENTIAL_PROXY_UDP_LOCAL_PORT="${RESIDENTIAL_PROXY_UDP_LOCAL_PORT:-12346}"
 ENABLE_AWS_CONSOLE_EGRESS_SWITCH="${ENABLE_AWS_CONSOLE_EGRESS_SWITCH:-false}"
@@ -38,6 +40,8 @@ FIREWALL_SOURCE_FILE="${SCRIPT_DIR}/../firewall/apply-vpn-firewall.sh"
 FIREWALL_TARGET_FILE="/usr/local/sbin/apply-vpn-firewall.sh"
 PROXY_RUNNER_SOURCE_FILE="${SCRIPT_DIR}/../runtime/run-residential-proxy.sh"
 PROXY_RUNNER_TARGET_FILE="/usr/local/sbin/run-residential-proxy.sh"
+PROXY_HEALTHCHECK_SOURCE_FILE="${SCRIPT_DIR}/../runtime/check-residential-proxy-health.sh"
+PROXY_HEALTHCHECK_TARGET_FILE="/usr/local/sbin/check-residential-proxy-health.sh"
 UDP_PROXY_RUNNER_SOURCE_FILE="${SCRIPT_DIR}/../runtime/run-residential-udp-relay.sh"
 UDP_PROXY_RUNNER_TARGET_FILE="/usr/local/sbin/run-residential-udp-relay.sh"
 EGRESS_HELPER_SOURCE_FILE="${SCRIPT_DIR}/../runtime/wireguard-egress.sh"
@@ -46,6 +50,8 @@ AWS_EGRESS_SYNC_SOURCE_FILE="${SCRIPT_DIR}/../aws/sync-egress-mode-from-aws-tag.
 AWS_EGRESS_SYNC_TARGET_FILE="/usr/local/sbin/sync-egress-mode-from-aws-tag.sh"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/wg-firewall.service"
 PROXY_SYSTEMD_SERVICE_FILE="/etc/systemd/system/wg-residential-proxy.service"
+PROXY_HEALTHCHECK_SERVICE_FILE="/etc/systemd/system/wg-residential-proxy-health.service"
+PROXY_HEALTHCHECK_TIMER_FILE="/etc/systemd/system/wg-residential-proxy-health.timer"
 UDP_PROXY_SYSTEMD_SERVICE_FILE="/etc/systemd/system/wg-residential-udp-relay.service"
 AWS_EGRESS_SYNC_SERVICE_FILE="/etc/systemd/system/wg-egress-aws-sync.service"
 AWS_EGRESS_SYNC_TIMER_FILE="/etc/systemd/system/wg-egress-aws-sync.timer"
@@ -166,6 +172,7 @@ validate_egress_settings() {
         exit 1
     fi
 
+
     if [[ -z "$(resolve_ipv4 "${RESIDENTIAL_PROXY_HOST}")" ]]; then
         echo "Unable to resolve residential proxy host: ${RESIDENTIAL_PROXY_HOST}" >&2
         exit 1
@@ -232,8 +239,13 @@ all_peer_definitions() {
     printf '%s' "${definitions}"
 }
 
+server_address_ip() {
+    printf '%s' "${SERVER_ADDRESS_CIDR%%/*}"
+}
+
 client_template_dns_line() {
     local peer_dns
+    local dns_value
 
     peer_dns="$1"
 
@@ -241,11 +253,13 @@ client_template_dns_line() {
         return 0
     fi
 
+    dns_value="${peer_dns}"
+
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        return 0
+        dns_value="$(server_address_ip)"
     fi
 
-    printf 'DNS = %s\n' "${peer_dns}"
+    printf 'DNS = %s\n' "${dns_value}"
 }
 
 validate_peer_definitions() {
@@ -328,9 +342,22 @@ install_packages() {
 
 prepare_sysctl() {
     cat > /etc/sysctl.d/99-wireguard-vpn.conf <<EOF
+# Core network settings
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.disable_ipv6=1
 net.ipv6.conf.default.disable_ipv6=1
+
+# TCP performance tuning for VPN
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 1048576 16777216
+net.ipv4.tcp_wmem = 4096 1048576 16777216
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.netfilter.nf_conntrack_max = 262144
 EOF
 
     sysctl --system >/dev/null
@@ -361,6 +388,11 @@ install_egress_scripts() {
         exit 1
     fi
 
+    if [[ ! -f "${PROXY_HEALTHCHECK_SOURCE_FILE}" ]]; then
+        echo "Missing residential proxy healthcheck script: ${PROXY_HEALTHCHECK_SOURCE_FILE}" >&2
+        exit 1
+    fi
+
     if [[ ! -f "${EGRESS_HELPER_SOURCE_FILE}" ]]; then
         echo "Missing egress helper script: ${EGRESS_HELPER_SOURCE_FILE}" >&2
         exit 1
@@ -377,6 +409,7 @@ install_egress_scripts() {
     fi
 
     install -m 700 "${PROXY_RUNNER_SOURCE_FILE}" "${PROXY_RUNNER_TARGET_FILE}"
+    install -m 700 "${PROXY_HEALTHCHECK_SOURCE_FILE}" "${PROXY_HEALTHCHECK_TARGET_FILE}"
     install -m 700 "${UDP_PROXY_RUNNER_SOURCE_FILE}" "${UDP_PROXY_RUNNER_TARGET_FILE}"
     install -m 700 "${EGRESS_HELPER_SOURCE_FILE}" "${EGRESS_HELPER_TARGET_FILE}"
     install -m 700 "${AWS_EGRESS_SYNC_SOURCE_FILE}" "${AWS_EGRESS_SYNC_TARGET_FILE}"
@@ -422,6 +455,29 @@ EOF
     chmod 600 "${AWS_EGRESS_SYNC_ENV_FILE}"
 }
 
+configure_local_dns_listener() {
+    local resolved_dropin_dir
+    local resolved_dropin_file
+
+    resolved_dropin_dir="/etc/systemd/resolved.conf.d"
+    resolved_dropin_file="${resolved_dropin_dir}/99-wireguard-local-dns.conf"
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        install -d -m 755 "${resolved_dropin_dir}"
+        cat > "${resolved_dropin_file}" <<EOF
+[Resolve]
+DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
+FallbackDNS=
+Domains=~.
+DNSOverTLS=no
+DNSStubListener=yes
+DNSStubListenerExtra=$(server_address_ip)
+EOF
+    else
+        rm -f "${resolved_dropin_file}"
+    fi
+}
+
 write_wireguard_config() {
     local definitions
     local peer_entries
@@ -440,6 +496,7 @@ write_wireguard_config() {
 [Interface]
 Address = ${SERVER_ADDRESS_CIDR}
 ListenPort = ${WG_PORT}
+MTU = ${WG_TUNNEL_MTU}
 PrivateKey = $(cat "${SERVER_PRIVATE_KEY_FILE}")
 SaveConfig = false
 EOF
@@ -506,6 +563,34 @@ RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
+EOF
+}
+
+write_proxy_healthcheck_units() {
+    cat > "${PROXY_HEALTHCHECK_SERVICE_FILE}" <<EOF
+[Unit]
+Description=Watch residential proxy egress health for WireGuard clients
+After=network-online.target wg-residential-proxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=EGRESS_ENV_FILE=${EGRESS_ENV_FILE}
+Environment=PROXY_SERVICE=wg-residential-proxy.service
+ExecStart=${PROXY_HEALTHCHECK_TARGET_FILE}
+EOF
+
+    cat > "${PROXY_HEALTHCHECK_TIMER_FILE}" <<EOF
+[Unit]
+Description=Periodically validate residential proxy egress health
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=30s
+Unit=wg-residential-proxy-health.service
+
+[Install]
+WantedBy=timers.target
 EOF
 }
 
@@ -600,7 +685,8 @@ write_client_templates() {
 [Interface]
 PrivateKey = CLIENT_PRIVATE_KEY_GOES_HERE
 Address = ${peer_address}
-    $(client_template_dns_line "${peer_dns}")
+$(client_template_dns_line "${peer_dns}")
+MTU = ${WG_TUNNEL_MTU}
 
 [Peer]
 PublicKey = $(cat "${SERVER_PUBLIC_KEY_FILE}")
@@ -637,6 +723,9 @@ start_services() {
     if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
         systemctl enable wg-residential-proxy.service
         systemctl restart wg-residential-proxy.service
+        systemctl enable wg-residential-proxy-health.timer
+        systemctl restart wg-residential-proxy-health.timer
+        systemctl start wg-residential-proxy-health.service
         if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]] && udp_relay_ready; then
             systemctl enable wg-residential-udp-relay.service
             systemctl restart wg-residential-udp-relay.service
@@ -645,6 +734,8 @@ start_services() {
         fi
     else
         systemctl disable --now wg-residential-proxy.service >/dev/null 2>&1 || true
+        systemctl disable --now wg-residential-proxy-health.timer >/dev/null 2>&1 || true
+        systemctl stop wg-residential-proxy-health.service >/dev/null 2>&1 || true
         systemctl disable --now wg-residential-udp-relay.service >/dev/null 2>&1 || true
     fi
     if [[ "${ENABLE_AWS_CONSOLE_EGRESS_SWITCH}" == "true" ]]; then
@@ -657,6 +748,7 @@ start_services() {
     fi
     systemctl enable "wg-quick@${WG_INTERFACE}"
     systemctl restart "wg-quick@${WG_INTERFACE}"
+    systemctl restart systemd-resolved >/dev/null 2>&1 || true
 }
 
 print_summary() {
@@ -675,8 +767,9 @@ print_summary() {
     echo "Firewall config: /etc/default/wireguard-firewall"
     echo "Egress config: ${EGRESS_ENV_FILE}"
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        echo "DNS note: client UDP DNS is intentionally not configured in tcp-only http-connect mode."
-        echo "DNS note: use encrypted DNS over TCP/TLS/HTTPS on the client if you want name resolution through the tunnel."
+        echo "DNS note: client DNS is pinned to $(server_address_ip) in tcp-only http-connect mode."
+        echo "DNS note: the server exposes a local resolver on port 53 and forwards upstream DNS to ${RESIDENTIAL_DNS_UPSTREAM_IP}."
+        echo "Proxy note: a health timer checks the local transparent proxy every 30 seconds."
     fi
     echo
     echo "Primary client template content for AWS system log retrieval:"
@@ -714,9 +807,11 @@ main() {
     write_firewall_environment
     write_egress_environment
     write_aws_console_switch_environment
+    configure_local_dns_listener
     write_wireguard_config
     write_systemd_service
     write_proxy_systemd_service
+    write_proxy_healthcheck_units
     write_udp_proxy_systemd_service
     write_aws_console_sync_units
     write_client_templates

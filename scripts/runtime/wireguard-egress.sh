@@ -7,6 +7,7 @@ PROXY_SERVICE="${PROXY_SERVICE:-wg-residential-proxy.service}"
 UDP_PROXY_SERVICE="${UDP_PROXY_SERVICE:-wg-residential-udp-relay.service}"
 FIREWALL_SERVICE="${FIREWALL_SERVICE:-wg-firewall.service}"
 UDP_RELAY_CONFIG_FILE="${UDP_RELAY_CONFIG_FILE:-/etc/sing-box/wg-residential-udp-relay.json}"
+WG_INTERFACE="${WG_INTERFACE:-wg0}"
 ENABLE_SOCKS5_UDP_SUPPORT="${ENABLE_SOCKS5_UDP_SUPPORT:-false}"
 RESIDENTIAL_PROXY_UDP_LOCAL_PORT="${RESIDENTIAL_PROXY_UDP_LOCAL_PORT:-12346}"
 
@@ -31,6 +32,7 @@ load_env() {
     RESIDENTIAL_PROXY_USERNAME="${RESIDENTIAL_PROXY_USERNAME:-}"
     RESIDENTIAL_PROXY_PASSWORD="${RESIDENTIAL_PROXY_PASSWORD:-}"
     RESIDENTIAL_PROXY_LOCAL_PORT="${RESIDENTIAL_PROXY_LOCAL_PORT:-12345}"
+    RESIDENTIAL_DNS_UPSTREAM_IP="${RESIDENTIAL_DNS_UPSTREAM_IP:-54.72.70.84}"
     ENABLE_SOCKS5_UDP_SUPPORT="${ENABLE_SOCKS5_UDP_SUPPORT:-false}"
     RESIDENTIAL_PROXY_UDP_LOCAL_PORT="${RESIDENTIAL_PROXY_UDP_LOCAL_PORT:-12346}"
 }
@@ -63,6 +65,41 @@ resolve_ipv4() {
     getent ahostsv4 "${host}" | awk 'NR == 1 {print $1; exit}'
 }
 
+server_address_ip() {
+    ip -4 -o addr show dev "${WG_INTERFACE}" | awk 'NR == 1 {print $4}' | cut -d/ -f1
+}
+
+configure_local_dns_listener() {
+    local resolved_dropin_dir
+    local resolved_dropin_file
+    local local_dns_ip
+
+    resolved_dropin_dir="/etc/systemd/resolved.conf.d"
+    resolved_dropin_file="${resolved_dropin_dir}/99-wireguard-local-dns.conf"
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        local_dns_ip="$(server_address_ip)"
+
+        if [[ -z "${local_dns_ip}" ]]; then
+            echo "Unable to determine ${WG_INTERFACE} IPv4 address for local DNS listener." >&2
+            exit 1
+        fi
+
+        install -d -m 755 "${resolved_dropin_dir}"
+        cat > "${resolved_dropin_file}" <<EOF
+[Resolve]
+DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
+FallbackDNS=
+Domains=~.
+DNSOverTLS=no
+DNSStubListener=yes
+DNSStubListenerExtra=${local_dns_ip}
+EOF
+    else
+        rm -f "${resolved_dropin_file}"
+    fi
+}
+
 write_env() {
     install -d -m 755 "$(dirname "${ENV_FILE}")"
 
@@ -75,6 +112,7 @@ RESIDENTIAL_PROXY_PORT="$(escape_env_value "${RESIDENTIAL_PROXY_PORT}")"
 RESIDENTIAL_PROXY_USERNAME="$(escape_env_value "${RESIDENTIAL_PROXY_USERNAME}")"
 RESIDENTIAL_PROXY_PASSWORD="$(escape_env_value "${RESIDENTIAL_PROXY_PASSWORD}")"
 RESIDENTIAL_PROXY_LOCAL_PORT="$(escape_env_value "${RESIDENTIAL_PROXY_LOCAL_PORT}")"
+RESIDENTIAL_DNS_UPSTREAM_IP="$(escape_env_value "${RESIDENTIAL_DNS_UPSTREAM_IP}")"
 ENABLE_SOCKS5_UDP_SUPPORT="$(escape_env_value "${ENABLE_SOCKS5_UDP_SUPPORT}")"
 RESIDENTIAL_PROXY_UDP_LOCAL_PORT="$(escape_env_value "${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}")"
 EOF
@@ -145,6 +183,7 @@ udp_relay_ready() {
 
 apply_services() {
     systemctl daemon-reload
+    configure_local_dns_listener
 
     if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
         systemctl enable "${PROXY_SERVICE}" >/dev/null
@@ -162,6 +201,7 @@ apply_services() {
     fi
 
     systemctl restart "${FIREWALL_SERVICE}"
+    systemctl restart systemd-resolved
 }
 
 print_status() {
@@ -175,6 +215,10 @@ print_status() {
     echo "Proxy local redirect port: ${RESIDENTIAL_PROXY_LOCAL_PORT}"
     echo "SOCKS5 UDP support: ${ENABLE_SOCKS5_UDP_SUPPORT}"
     echo "UDP local redirect port: ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}"
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        echo "DNS upstream mode: systemd-resolved -> ${RESIDENTIAL_DNS_UPSTREAM_IP}"
+    fi
 
     if systemctl is-active --quiet "${PROXY_SERVICE}"; then
         echo "Residential proxy service: active"
@@ -291,7 +335,7 @@ usage() {
     cat <<'EOF'
 Usage:
   wireguard-egress status
-    wireguard-egress configure --host HOST --port PORT [--type socks5|http-connect] [--username USER] [--password PASS] [--local-port PORT] [--enable-udp true|false] [--udp-local-port PORT]
+        wireguard-egress configure --host HOST --port PORT [--type socks5|http-connect] [--username USER] [--password PASS] [--local-port PORT] [--enable-udp true|false] [--udp-local-port PORT]
   wireguard-egress enable
   wireguard-egress disable
   wireguard-egress remove

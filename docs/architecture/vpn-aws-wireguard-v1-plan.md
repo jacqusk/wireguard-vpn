@@ -14,12 +14,12 @@ Priorytety na teraz:
 
 ## Co budujemy w wersji 1
 
-Budujemy pojedyncza instancje EC2 w regionie Irlandia, z uruchomionym WireGuard.
+Budujemy pojedyncza instancje EC2 w regionie Frankfurt, z uruchomionym WireGuard.
 
 Zalozenia techniczne:
 
 - jedna instancja EC2,
-- jeden region AWS: Irlandia,
+- jeden region AWS: Frankfurt,
 - pierwszy rollout walidujemy peerem `phone-test-1`,
 - opcjonalnie drugi peer testowy to `cloud-test-1`,
 - travel router pozostaje krokiem finalnym po przejsciu testow bazowych,
@@ -50,7 +50,7 @@ Przeplyw ruchu:
 
 Elementy architektury:
 
-- EC2 w regionie Irlandia,
+- EC2 w regionie Frankfurt,
 - Elastic IP przypisany do instancji,
 - WireGuard jako publiczny punkt wejscia,
 - reguly firewalla wymuszajace fail-closed,
@@ -153,7 +153,7 @@ Praktyczny wybor dla wersji 1:
 
 Ustalony start:
 
-- region AWS: Irlandia,
+- region AWS: Frankfurt,
 - jedna instancja EC2,
 - `phone-test-1` jako pierwszy peer testowy,
 - opcjonalny `cloud-test-1` jako drugi peer testowy,
@@ -202,7 +202,7 @@ Aktualny krok przejsciowy:
 Na start realizujemy wersje 1:
 
 - WireGuard na EC2,
-- region Irlandia,
+- region Frankfurt,
 - jedna instancja,
 - `phone-test-1` jako pierwszy klient testowy,
 - opcjonalny `cloud-test-1` jako drugi klient testowy,

@@ -6,7 +6,7 @@ Ta checklista opisuje jednorazowe wdrozenie serwera WireGuard na EC2 oraz poznie
 
 ## Zalozenia
 
-- region startowy: Irlandia (`eu-west-1`),
+- region startowy: Frankfurt (`eu-central-1`),
 - jedna instancja EC2,
 - pierwszy rollout jest testowany telefonem jako osobnym peerem WireGuard,
 - opcjonalnie drugi peer testowy moze byc uruchomiony w chmurze,
@@ -90,7 +90,7 @@ Zachowaj:
 
 ## Uruchomienie instancji EC2
 
-1. Wejdz do AWS Console w regionie `eu-west-1`.
+1. Wejdz do AWS Console w regionie `eu-central-1`.
 2. Otworz EC2 i wybierz `Launch instance`.
 3. Nazwa instancji: na przyklad `wireguard-vpn-v1`.
 4. AMI: Ubuntu Server 24.04 LTS.

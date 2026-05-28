@@ -25,6 +25,7 @@ RESIDENTIAL_PROXY_PORT=""
 RESIDENTIAL_PROXY_USERNAME=""
 RESIDENTIAL_PROXY_PASSWORD=""
 RESIDENTIAL_PROXY_LOCAL_PORT="12345"
+RESIDENTIAL_DNS_UPSTREAM_IP="54.72.70.84"
 ENABLE_SOCKS5_UDP_SUPPORT="false"
 RESIDENTIAL_PROXY_UDP_LOCAL_PORT="12346"
 ENABLE_AWS_CONSOLE_EGRESS_SWITCH="false"
@@ -36,11 +37,14 @@ SERVER_PRIVATE_KEY_FILE="${WIREGUARD_DIR}/server.key"
 SERVER_PUBLIC_KEY_FILE="${WIREGUARD_DIR}/server.pub"
 FIREWALL_TARGET_FILE="/usr/local/sbin/apply-vpn-firewall.sh"
 PROXY_RUNNER_TARGET_FILE="/usr/local/sbin/run-residential-proxy.sh"
+PROXY_HEALTHCHECK_TARGET_FILE="/usr/local/sbin/check-residential-proxy-health.sh"
 UDP_PROXY_RUNNER_TARGET_FILE="/usr/local/sbin/run-residential-udp-relay.sh"
 EGRESS_HELPER_TARGET_FILE="/usr/local/sbin/wireguard-egress"
 AWS_EGRESS_SYNC_TARGET_FILE="/usr/local/sbin/sync-egress-mode-from-aws-tag.sh"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/wg-firewall.service"
 PROXY_SYSTEMD_SERVICE_FILE="/etc/systemd/system/wg-residential-proxy.service"
+PROXY_HEALTHCHECK_SERVICE_FILE="/etc/systemd/system/wg-residential-proxy-health.service"
+PROXY_HEALTHCHECK_TIMER_FILE="/etc/systemd/system/wg-residential-proxy-health.timer"
 UDP_PROXY_SYSTEMD_SERVICE_FILE="/etc/systemd/system/wg-residential-udp-relay.service"
 AWS_EGRESS_SYNC_SERVICE_FILE="/etc/systemd/system/wg-egress-aws-sync.service"
 AWS_EGRESS_SYNC_TIMER_FILE="/etc/systemd/system/wg-egress-aws-sync.timer"
@@ -53,6 +57,10 @@ AWS_EGRESS_SYNC_ENV_FILE="/etc/default/wireguard-egress-aws-sync"
 
 log() {
     echo "[wireguard-user-data] $*"
+}
+
+server_address_ip() {
+    printf '%s' "${SERVER_ADDRESS_CIDR%%/*}"
 }
 
 default_interface() {
@@ -85,6 +93,45 @@ resolve_ipv4() {
     fi
 
     getent ahostsv4 "${host}" | awk 'NR == 1 {print $1; exit}'
+}
+
+validate_ipv4_or_cidr_list() {
+    local list_name
+    local list_value
+    local ipv4
+    local octet
+    local prefix
+
+    list_name="$1"
+    list_value="$2"
+
+    for ipv4 in ${list_value//,/ }; do
+        [[ -n "${ipv4}" ]] || continue
+
+        prefix=""
+        if [[ "${ipv4}" == */* ]]; then
+            prefix="${ipv4#*/}"
+            ipv4="${ipv4%%/*}"
+
+            if [[ ! "${prefix}" =~ ^[0-9]+$ ]] || (( prefix < 0 || prefix > 32 )); then
+                log "${list_name} contains an invalid IPv4 CIDR: ${ipv4}/${prefix}"
+                exit 1
+            fi
+        fi
+
+        if [[ ! "${ipv4}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            log "${list_name} contains an invalid IPv4 address: ${ipv4}"
+            exit 1
+        fi
+
+        IFS=. read -r -a octets <<< "${ipv4}"
+        for octet in "${octets[@]}"; do
+            if (( octet < 0 || octet > 255 )); then
+                log "${list_name} contains an invalid IPv4 address: ${ipv4}"
+                exit 1
+            fi
+        done
+    done
 }
 
 sanitize_peer_name() {
@@ -138,6 +185,7 @@ all_peer_definitions() {
 
 client_template_dns_line() {
     local peer_dns
+    local dns_value
 
     peer_dns="$1"
 
@@ -145,11 +193,36 @@ client_template_dns_line() {
         return 0
     fi
 
+    dns_value="${peer_dns}"
+
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        return 0
+        dns_value="$(server_address_ip)"
     fi
 
-    printf 'DNS = %s\n' "${peer_dns}"
+    printf 'DNS = %s\n' "${dns_value}"
+}
+
+configure_local_dns_listener() {
+    local resolved_dropin_dir
+    local resolved_dropin_file
+
+    resolved_dropin_dir="/etc/systemd/resolved.conf.d"
+    resolved_dropin_file="${resolved_dropin_dir}/99-wireguard-local-dns.conf"
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        install -d -m 755 "${resolved_dropin_dir}"
+        cat > "${resolved_dropin_file}" <<EOF
+[Resolve]
+DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
+FallbackDNS=
+Domains=~.
+DNSOverTLS=no
+DNSStubListener=yes
+DNSStubListenerExtra=$(server_address_ip)
+EOF
+    else
+        rm -f "${resolved_dropin_file}"
+    fi
 }
 
 validate_egress_settings() {
@@ -318,9 +391,22 @@ systemctl disable --now redsocks.service >/dev/null 2>&1 || true
 
 log "Applying sysctl settings"
 cat > /etc/sysctl.d/99-wireguard-vpn.conf <<EOF
+# Core network settings
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.disable_ipv6=1
 net.ipv6.conf.default.disable_ipv6=1
+
+# TCP performance tuning for VPN
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 1048576 16777216
+net.ipv4.tcp_wmem = 4096 1048576 16777216
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.netfilter.nf_conntrack_max = 262144
 EOF
 sysctl --system >/dev/null
 
@@ -348,6 +434,7 @@ ENABLE_SOCKS5_UDP_SUPPORT="${ENABLE_SOCKS5_UDP_SUPPORT:-false}"
 RESIDENTIAL_PROXY_IP="${RESIDENTIAL_PROXY_IP:-}"
 RESIDENTIAL_PROXY_PORT="${RESIDENTIAL_PROXY_PORT:-}"
 RESIDENTIAL_PROXY_LOCAL_PORT="${RESIDENTIAL_PROXY_LOCAL_PORT:-12345}"
+RESIDENTIAL_DNS_UPSTREAM_IP="${RESIDENTIAL_DNS_UPSTREAM_IP:-54.72.70.84}"
 RESIDENTIAL_PROXY_UDP_LOCAL_PORT="${RESIDENTIAL_PROXY_UDP_LOCAL_PORT:-12346}"
 
 if [[ -f "${EGRESS_ENV_FILE}" ]]; then
@@ -394,6 +481,26 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     fi
 
     iptables -A INPUT -i "${WG_INTERFACE}" -p tcp --dport "${RESIDENTIAL_PROXY_LOCAL_PORT}" -j ACCEPT
+    if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        iptables -A INPUT -i "${WG_INTERFACE}" -p udp --dport 53 -j ACCEPT
+        iptables -A INPUT -i "${WG_INTERFACE}" -p tcp --dport 53 -j ACCEPT
+
+        iptables -N WG_BLOCK_EXTERNAL_DNS
+        iptables -A WG_BLOCK_EXTERNAL_DNS -d 127.0.0.0/8 -j RETURN
+        iptables -A WG_BLOCK_EXTERNAL_DNS -d "${WG_NETWORK_CIDR}" -j RETURN
+        iptables -A WG_BLOCK_EXTERNAL_DNS -d "${RESIDENTIAL_DNS_UPSTREAM_IP}/32" -j RETURN
+        iptables -A WG_BLOCK_EXTERNAL_DNS -p udp --dport 53 -j REJECT
+        iptables -A WG_BLOCK_EXTERNAL_DNS -p tcp --dport 53 -j REJECT
+        iptables -A OUTPUT -j WG_BLOCK_EXTERNAL_DNS
+
+        # Intercept TCP DNS from wg0 clients to any external resolver and force it through
+        # systemd-resolved on this host.  Without this a client could bypass the controlled
+        # resolver by sending DNS over TCP, which would be transparently proxied onward.
+        # UDP DNS to external resolvers is caught by the FORWARD REJECT below, but redirect
+        # it here too so clients with a hardcoded resolver still get answers.
+        iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p udp --dport 53 -j REDIRECT --to-ports 53
+        iptables -t nat -A PREROUTING -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp --dport 53 -j REDIRECT --to-ports 53
+    fi
     if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
         iptables -A INPUT -i "${WG_INTERFACE}" -p udp --dport "${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}" -j ACCEPT
 
@@ -416,6 +523,11 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     fi
 
     iptables -A FORWARD -i "${UPLINK_IFACE}" -d "${WG_NETWORK_CIDR}" -o "${WG_INTERFACE}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    # Reject forwarded traffic from wg0 clients explicitly so they fail fast instead of timing out.
+    # TCP (e.g. connections to blocked relay CIDRs) gets an immediate RST.
+    # Everything else (UDP STUN/QUIC, ICMP) gets ICMP admin-prohibited.
+    iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -p tcp -j REJECT --reject-with tcp-reset
+    iptables -A FORWARD -i "${WG_INTERFACE}" -s "${WG_NETWORK_CIDR}" -j REJECT --reject-with icmp-admin-prohibited
 
     iptables -t nat -N WG_TCP_PROXY
     iptables -t nat -A WG_TCP_PROXY -d 0.0.0.0/8 -j RETURN
@@ -549,6 +661,164 @@ exec "${REDSOCKS_BIN}" -c "${REDSOCKS_CONFIG_FILE}"
 EOF
 chmod 700 "${PROXY_RUNNER_TARGET_FILE}"
 
+log "Writing residential proxy healthcheck helper"
+cat > "${PROXY_HEALTHCHECK_TARGET_FILE}" <<'EOF'
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+EGRESS_ENV_FILE="${EGRESS_ENV_FILE:-/etc/default/wireguard-egress}"
+PROXY_SERVICE="${PROXY_SERVICE:-wg-residential-proxy.service}"
+FIREWALL_SERVICE="${FIREWALL_SERVICE:-wg-firewall.service}"
+WG_INTERFACE="${WG_INTERFACE:-wg0}"
+LOCAL_CLOSE_WAIT_THRESHOLD="${LOCAL_CLOSE_WAIT_THRESHOLD:-64}"
+LISTENER_BACKLOG_THRESHOLD="${LISTENER_BACKLOG_THRESHOLD:-64}"
+RESTART_STATE_DIR="${RESTART_STATE_DIR:-/var/lib/wg-residential-proxy-health}"
+RESTART_COOLDOWN_SECONDS="${RESTART_COOLDOWN_SECONDS:-120}"
+MAX_RESTARTS_IN_WINDOW="${MAX_RESTARTS_IN_WINDOW:-3}"
+RESTART_WINDOW_SECONDS="${RESTART_WINDOW_SECONDS:-300}"
+
+log() {
+    local message
+
+    message="$1"
+    echo "[wg-residential-proxy-health] ${message}"
+
+    if command -v logger >/dev/null 2>&1; then
+        logger -t wg-residential-proxy-health -- "${message}"
+    fi
+}
+
+restart_proxy() {
+    local reason
+    local now
+    local last_restart
+    local recent_count
+
+    reason="$1"
+
+    install -d -m 700 "${RESTART_STATE_DIR}"
+    now="$(date +%s)"
+
+    if [[ -f "${RESTART_STATE_DIR}/last_restart" ]]; then
+        last_restart="$(cat "${RESTART_STATE_DIR}/last_restart")"
+        if (( now - last_restart < RESTART_COOLDOWN_SECONDS )); then
+            log "Skipping restart (cooldown): last restart was $((now - last_restart))s ago, need ${RESTART_COOLDOWN_SECONDS}s"
+            return 0
+        fi
+    fi
+
+    recent_count="$(find "${RESTART_STATE_DIR}" -name 'restart_*' -mmin "-$((RESTART_WINDOW_SECONDS / 60 + 1))" 2>/dev/null | wc -l)"
+    if (( recent_count >= MAX_RESTARTS_IN_WINDOW )); then
+        log "Skipping restart (rate limit): ${recent_count} restarts in last ${RESTART_WINDOW_SECONDS}s, max is ${MAX_RESTARTS_IN_WINDOW}"
+        return 0
+    fi
+
+    log "Restarting ${PROXY_SERVICE}: ${reason}"
+    systemctl restart "${PROXY_SERVICE}"
+
+    printf '%s' "${now}" > "${RESTART_STATE_DIR}/last_restart"
+    touch "${RESTART_STATE_DIR}/restart_${now}"
+
+    find "${RESTART_STATE_DIR}" -name 'restart_*' -mmin "+$((RESTART_WINDOW_SECONDS / 60 + 5))" -delete 2>/dev/null || true
+}
+
+listener_present() {
+    local local_port
+
+    local_port="$1"
+
+    ss -ltnH | awk -v suffix=":${local_port}" '$4 ~ suffix"$" {found=1} END {exit(found ? 0 : 1)}'
+}
+
+listener_backlog() {
+    local local_port
+
+    local_port="$1"
+
+    ss -ltnH | awk -v suffix=":${local_port}" '$4 ~ suffix"$" {print $2; found=1; exit} END {if (!found) print 0}'
+}
+
+count_local_close_wait() {
+    local local_port
+
+    local_port="$1"
+
+    ss -tanH | awk -v suffix=":${local_port}" '$1 == "CLOSE-WAIT" && $4 ~ suffix"$" {count++} END {print count + 0}'
+}
+
+count_upstream_established() {
+    local proxy_ip
+    local proxy_port
+
+    proxy_ip="$1"
+    proxy_port="$2"
+
+    if [[ -z "${proxy_ip}" || -z "${proxy_port}" ]]; then
+        echo 0
+        return
+    fi
+
+    ss -tanH | awk -v target="${proxy_ip}:${proxy_port}" '$1 == "ESTAB" && $5 == target {count++} END {print count + 0}'
+}
+
+if [[ -f "${EGRESS_ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    source "${EGRESS_ENV_FILE}"
+fi
+
+EGRESS_MODE="${EGRESS_MODE:-direct}"
+RESIDENTIAL_PROXY_IP="${RESIDENTIAL_PROXY_IP:-}"
+RESIDENTIAL_PROXY_PORT="${RESIDENTIAL_PROXY_PORT:-}"
+RESIDENTIAL_PROXY_LOCAL_PORT="${RESIDENTIAL_PROXY_LOCAL_PORT:-12345}"
+
+if [[ "${EGRESS_MODE}" != "residential-proxy" ]]; then
+    exit 0
+fi
+
+if ! ip link show "${WG_INTERFACE}" >/dev/null 2>&1; then
+    log "WARNING: WireGuard interface ${WG_INTERFACE} is missing - restarting wg-quick"
+    systemctl restart "wg-quick@${WG_INTERFACE}" || true
+    exit 0
+fi
+
+if ! systemctl is-active --quiet "${FIREWALL_SERVICE}"; then
+    log "WARNING: Firewall service is inactive - restarting"
+    systemctl restart "${FIREWALL_SERVICE}" || true
+fi
+
+if [[ "${RESIDENTIAL_PROXY_TYPE:-}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT:-false}" != "true" ]]; then
+    if ! systemctl is-active --quiet systemd-resolved; then
+        log "WARNING: systemd-resolved is inactive - restarting"
+        systemctl restart systemd-resolved || true
+    fi
+fi
+
+if ! systemctl is-active --quiet "${PROXY_SERVICE}"; then
+    restart_proxy "service is inactive"
+    exit 0
+fi
+
+if ! listener_present "${RESIDENTIAL_PROXY_LOCAL_PORT}"; then
+    restart_proxy "listener missing on tcp/${RESIDENTIAL_PROXY_LOCAL_PORT}"
+    exit 0
+fi
+
+local_close_wait="$(count_local_close_wait "${RESIDENTIAL_PROXY_LOCAL_PORT}")"
+listener_recv_q="$(listener_backlog "${RESIDENTIAL_PROXY_LOCAL_PORT}")"
+upstream_established="$(count_upstream_established "${RESIDENTIAL_PROXY_IP}" "${RESIDENTIAL_PROXY_PORT}")"
+
+if (( listener_recv_q >= LISTENER_BACKLOG_THRESHOLD )); then
+    restart_proxy "detected listener backlog ${listener_recv_q} on tcp/${RESIDENTIAL_PROXY_LOCAL_PORT}"
+    exit 0
+fi
+
+if (( local_close_wait >= LOCAL_CLOSE_WAIT_THRESHOLD && upstream_established == 0 )); then
+    restart_proxy "detected ${local_close_wait} CLOSE-WAIT sockets on tcp/${RESIDENTIAL_PROXY_LOCAL_PORT} and no established upstream proxy sessions"
+fi
+EOF
+chmod 700 "${PROXY_HEALTHCHECK_TARGET_FILE}"
+
 log "Writing residential UDP relay runner"
 cat > "${UDP_PROXY_RUNNER_TARGET_FILE}" <<'EOF'
 #!/usr/bin/env bash
@@ -634,6 +904,7 @@ load_env() {
     RESIDENTIAL_PROXY_USERNAME="${RESIDENTIAL_PROXY_USERNAME:-}"
     RESIDENTIAL_PROXY_PASSWORD="${RESIDENTIAL_PROXY_PASSWORD:-}"
     RESIDENTIAL_PROXY_LOCAL_PORT="${RESIDENTIAL_PROXY_LOCAL_PORT:-12345}"
+    WG_INTERFACE="${WG_INTERFACE:-wg0}"
     ENABLE_SOCKS5_UDP_SUPPORT="${ENABLE_SOCKS5_UDP_SUPPORT:-false}"
     RESIDENTIAL_PROXY_UDP_LOCAL_PORT="${RESIDENTIAL_PROXY_UDP_LOCAL_PORT:-12346}"
 }
@@ -664,6 +935,80 @@ resolve_ipv4() {
     fi
 
     getent ahostsv4 "${host}" | awk 'NR == 1 {print $1; exit}'
+}
+
+validate_ipv4_or_cidr_list() {
+    local list_name
+    local list_value
+    local ipv4
+    local octet
+    local prefix
+
+    list_name="$1"
+    list_value="$2"
+
+    for ipv4 in ${list_value//,/ }; do
+        [[ -n "${ipv4}" ]] || continue
+
+        prefix=""
+        if [[ "${ipv4}" == */* ]]; then
+            prefix="${ipv4#*/}"
+            ipv4="${ipv4%%/*}"
+
+            if [[ ! "${prefix}" =~ ^[0-9]+$ ]] || (( prefix < 0 || prefix > 32 )); then
+                echo "${list_name} contains an invalid IPv4 CIDR: ${ipv4}/${prefix}" >&2
+                exit 1
+            fi
+        fi
+
+        if [[ ! "${ipv4}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            echo "${list_name} contains an invalid IPv4 address: ${ipv4}" >&2
+            exit 1
+        fi
+
+        IFS=. read -r -a octets <<< "${ipv4}"
+        for octet in "${octets[@]}"; do
+            if (( octet < 0 || octet > 255 )); then
+                echo "${list_name} contains an invalid IPv4 address: ${ipv4}" >&2
+                exit 1
+            fi
+        done
+    done
+}
+
+server_runtime_address_ip() {
+    ip -4 -o addr show dev "${WG_INTERFACE}" | awk 'NR == 1 {print $4}' | cut -d/ -f1
+}
+
+configure_runtime_local_dns_listener() {
+    local resolved_dropin_dir
+    local resolved_dropin_file
+    local local_dns_ip
+
+    resolved_dropin_dir="/etc/systemd/resolved.conf.d"
+    resolved_dropin_file="${resolved_dropin_dir}/99-wireguard-local-dns.conf"
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        local_dns_ip="$(server_runtime_address_ip)"
+
+        if [[ -z "${local_dns_ip}" ]]; then
+            echo "Unable to determine ${WG_INTERFACE} IPv4 address for local DNS listener." >&2
+            exit 1
+        fi
+
+        install -d -m 755 "${resolved_dropin_dir}"
+        cat > "${resolved_dropin_file}" <<RESOLVED_CONF_EOF
+[Resolve]
+DNS=${RESIDENTIAL_DNS_UPSTREAM_IP}
+FallbackDNS=
+Domains=~.
+DNSOverTLS=no
+DNSStubListener=yes
+DNSStubListenerExtra=${local_dns_ip}
+RESOLVED_CONF_EOF
+    else
+        rm -f "${resolved_dropin_file}"
+    fi
 }
 
 write_env() {
@@ -748,6 +1093,7 @@ udp_relay_ready() {
 
 apply_services() {
     systemctl daemon-reload
+    configure_runtime_local_dns_listener
 
     if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
         systemctl enable "${PROXY_SERVICE}" >/dev/null
@@ -765,6 +1111,7 @@ apply_services() {
     fi
 
     systemctl restart "${FIREWALL_SERVICE}"
+    systemctl restart systemd-resolved
 }
 
 print_status() {
@@ -778,6 +1125,10 @@ print_status() {
     echo "Proxy local redirect port: ${RESIDENTIAL_PROXY_LOCAL_PORT}"
     echo "SOCKS5 UDP support: ${ENABLE_SOCKS5_UDP_SUPPORT}"
     echo "UDP local redirect port: ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}"
+
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        echo "DNS upstream mode: systemd-resolved -> ${RESIDENTIAL_DNS_UPSTREAM_IP}"
+    fi
 
     if systemctl is-active --quiet "${PROXY_SERVICE}"; then
         echo "Residential proxy service: active"
@@ -894,7 +1245,7 @@ usage() {
     cat <<'EOUSAGE'
 Usage:
   wireguard-egress status
-    wireguard-egress configure --host HOST --port PORT [--type socks5|http-connect] [--username USER] [--password PASS] [--local-port PORT] [--enable-udp true|false] [--udp-local-port PORT]
+        wireguard-egress configure --host HOST --port PORT [--type socks5|http-connect] [--username USER] [--password PASS] [--local-port PORT] [--enable-udp true|false] [--udp-local-port PORT] [--blocked-tcp-ips IPV4_OR_CIDR[,IPV4_OR_CIDR...]]
   wireguard-egress enable
   wireguard-egress disable
   wireguard-egress remove
@@ -907,6 +1258,7 @@ Notes:
         - The project installs wg-residential-udp-relay.service as a sing-box wrapper; provide /etc/sing-box/wg-residential-udp-relay.json to use it
         - The bundled wg-residential-proxy service remains TCP-only
   - direct DNS from AWS is blocked in residential-proxy mode
+    - blocked TCP destination IPs or CIDRs are dropped before the transparent proxy redirect
   - if something breaks, switch back to direct mode and use AWS IP as the fallback egress
 EOUSAGE
 }
@@ -1168,6 +1520,33 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+log "Writing residential proxy healthcheck units"
+cat > "${PROXY_HEALTHCHECK_SERVICE_FILE}" <<EOF
+[Unit]
+Description=Watch residential proxy egress health for WireGuard clients
+After=network-online.target wg-residential-proxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=EGRESS_ENV_FILE=${EGRESS_ENV_FILE}
+Environment=PROXY_SERVICE=wg-residential-proxy.service
+ExecStart=${PROXY_HEALTHCHECK_TARGET_FILE}
+EOF
+
+cat > "${PROXY_HEALTHCHECK_TIMER_FILE}" <<EOF
+[Unit]
+Description=Periodically validate residential proxy egress health
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec=30s
+Unit=wg-residential-proxy-health.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 log "Writing residential UDP relay systemd unit"
 cat > "${UDP_PROXY_SYSTEMD_SERVICE_FILE}" <<EOF
 [Unit]
@@ -1234,6 +1613,7 @@ for peer_entry in "${peer_entries[@]}"; do
 PrivateKey = CLIENT_PRIVATE_KEY_GOES_HERE
 Address = ${peer_address}
 $(client_template_dns_line "${peer_dns}")
+MTU = ${WG_TUNNEL_MTU}
 
 [Peer]
 PublicKey = $(cat "${SERVER_PUBLIC_KEY_FILE}")
@@ -1261,6 +1641,8 @@ if [[ "${found_primary}" != "true" ]]; then
     exit 1
 fi
 
+configure_local_dns_listener
+
 log "Enabling services"
 systemctl daemon-reload
 systemctl enable wg-firewall.service
@@ -1268,6 +1650,9 @@ systemctl start wg-firewall.service
 if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     systemctl enable wg-residential-proxy.service
     systemctl start wg-residential-proxy.service
+    systemctl enable wg-residential-proxy-health.timer
+    systemctl restart wg-residential-proxy-health.timer
+    systemctl start wg-residential-proxy-health.service
 
     if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]] && command -v sing-box >/dev/null 2>&1 && [[ -f /etc/sing-box/wg-residential-udp-relay.json ]]; then
         systemctl enable wg-residential-udp-relay.service
@@ -1277,6 +1662,8 @@ if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     fi
 else
     systemctl disable --now wg-residential-proxy.service >/dev/null 2>&1 || true
+    systemctl disable --now wg-residential-proxy-health.timer >/dev/null 2>&1 || true
+    systemctl stop wg-residential-proxy-health.service >/dev/null 2>&1 || true
     systemctl disable --now wg-residential-udp-relay.service >/dev/null 2>&1 || true
 fi
 if [[ "${ENABLE_AWS_CONSOLE_EGRESS_SWITCH}" == "true" ]]; then
@@ -1289,6 +1676,7 @@ else
 fi
 systemctl enable "wg-quick@${WG_INTERFACE}"
 systemctl start "wg-quick@${WG_INTERFACE}"
+systemctl restart systemd-resolved >/dev/null 2>&1 || true
 
 log "Bootstrap completed"
 log "Server public key: $(cat "${SERVER_PUBLIC_KEY_FILE}")"
@@ -1304,8 +1692,8 @@ fi
 if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
     log "Residential proxy note: this mode is strict fail-closed. Traffic that cannot use the upstream proxy is blocked instead of leaking through AWS."
     if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        log "DNS note: client UDP DNS is intentionally not configured in tcp-only http-connect mode."
-        log "DNS note: use encrypted DNS over TCP/TLS/HTTPS on the client if you want name resolution through the tunnel."
+        log "DNS note: client DNS is pinned to $(server_address_ip) in tcp-only http-connect mode."
+        log "DNS note: the server exposes a local resolver on port 53 and forwards upstream DNS over TLS through the residential proxy."
     fi
     if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
         log "UDP relay note: install sing-box config at /etc/sing-box/wg-residential-udp-relay.json, then start wg-residential-udp-relay.service."
