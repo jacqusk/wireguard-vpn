@@ -1,32 +1,28 @@
 # DNS Geolocation and DoH Considerations
 
-## Why We Use Provider's DNS (RESIDENTIAL_DNS_UPSTREAM_IP)
+## Why We Use Provider's DNS
 
 When using a residential proxy for geolocation purposes, **DNS must match the proxy's location**. 
 DNS leak tests check which DNS servers resolve your queries - if they're in a different country 
 than your apparent IP, it reveals your actual location.
 
-## Architecture: Transparent DNS Redirect
+## Architecture: Client-Controlled DNS
 
-The server intercepts **all DNS queries** from WireGuard clients and redirects them to 
-the configured upstream DNS:
+DNS is configured **on the client** (in WireGuard profile). The server only forwards DNS traffic:
 
 ```
-Client (any DNS setting) → WireGuard → NAT DNAT → 54.72.70.84 → MASQUERADE → Internet
+Client (DNS=54.72.70.84) → WireGuard → Server FORWARD → MASQUERADE → 54.72.70.84
 ```
 
-This means the client can have:
-- `DNS = 54.72.70.84` (direct, recommended)
-- `DNS = 10.44.0.1` (server IP, redirected)
-- `DNS = 8.8.8.8` (Google, redirected)
-- No DNS setting (uses system default, redirected)
+**Client controls DNS behavior:**
+| Client DNS Setting | Result |
+|-------------------|--------|
+| `DNS = 54.72.70.84` | Irish DNS (correct for Irish proxy) |
+| `DNS = 8.8.8.8` | Google DNS (potential geo mismatch) |
+| `DNS = 1.1.1.1` | Cloudflare DNS (potential geo mismatch) |
+| No DNS setting | System default outside tunnel (leak!) |
 
-All DNS traffic is forced through the configured `RESIDENTIAL_DNS_UPSTREAM_IP`.
-
-Benefits:
-- Works with any client DNS configuration
-- Impossible to leak DNS to wrong servers
-- Server enforces DNS policy transparently
+**Recommended:** Set `DNS = 54.72.70.84` (or current provider's DNS from config).
 
 ## Why DoH (DNS-over-HTTPS) Doesn't Work for Geolocation
 
