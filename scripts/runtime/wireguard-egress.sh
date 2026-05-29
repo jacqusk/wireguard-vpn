@@ -195,8 +195,12 @@ print_status() {
     echo "SOCKS5 UDP support: ${ENABLE_SOCKS5_UDP_SUPPORT}"
     echo "UDP local redirect port: ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT}"
 
-    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        echo "DNS mode: client -> forward -> ${RESIDENTIAL_DNS_UPSTREAM_IP}"
+    if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
+        if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
+            echo "DNS mode: client-configured resolver -> proxy path"
+        else
+            echo "DNS mode: client-configured resolver -> AWS direct"
+        fi
     fi
 
     if systemctl is-active --quiet "${PROXY_SERVICE}"; then

@@ -32,6 +32,10 @@ reset_policy_routing() {
     ip route flush table 100 2>/dev/null || true
 }
 
+dns_forwarding_without_udp_relay() {
+    [[ "${EGRESS_MODE}" == "residential-proxy" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]
+}
+
 configure_policy_routing() {
     if [[ "${EGRESS_MODE}" == "residential-proxy" && "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
         ip rule add fwmark 0x1/0x1 lookup 100
@@ -64,6 +68,10 @@ EOF
 -A INPUT -p udp --dport ${WG_PORT} -j ACCEPT
 EOF
 
+    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
+        echo "-A INPUT -p udp -m mark --mark 0x1/0x1 -j ACCEPT"
+    fi
+
     if [[ -n "${ALLOW_SSH_CIDR}" ]]; then
         echo "-A INPUT -p tcp -s ${ALLOW_SSH_CIDR} --dport 22 -j ACCEPT"
     fi
@@ -88,7 +96,7 @@ EOF
             echo "-A INPUT -i ${WG_INTERFACE} -p udp --dport ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT} -j ACCEPT"
         fi
 
-        if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        if dns_forwarding_without_udp_relay; then
             cat <<EOF
 -A FORWARD -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -p udp --dport 53 -j ACCEPT
 -A FORWARD -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -p tcp --dport 53 -j ACCEPT
@@ -126,7 +134,7 @@ EOF
 :WG_TCP_PROXY - [0:0]
 EOF
 
-        if [[ "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
+        if dns_forwarding_without_udp_relay; then
             cat <<EOF
 -A POSTROUTING -s ${WG_NETWORK_CIDR} -p udp --dport 53 -o ${UPLINK_IFACE} -j MASQUERADE
 -A POSTROUTING -s ${WG_NETWORK_CIDR} -p tcp --dport 53 -o ${UPLINK_IFACE} -j MASQUERADE
@@ -144,6 +152,15 @@ EOF
 -A WG_TCP_PROXY -d 240.0.0.0/4 -j RETURN
 -A WG_TCP_PROXY -d ${WG_NETWORK_CIDR} -j RETURN
 -A WG_TCP_PROXY -d ${RESIDENTIAL_PROXY_IP}/32 -j RETURN
+EOF
+
+    if dns_forwarding_without_udp_relay; then
+        cat <<EOF
+-A WG_TCP_PROXY -p tcp --dport 53 -j RETURN
+EOF
+    fi
+
+    cat <<EOF
 -A WG_TCP_PROXY -p tcp -j REDIRECT --to-ports ${RESIDENTIAL_PROXY_LOCAL_PORT}
 -A PREROUTING -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -p tcp -j WG_TCP_PROXY
 EOF
@@ -177,6 +194,15 @@ EOF
 -A WG_UDP_PROXY -d 240.0.0.0/4 -j RETURN
 -A WG_UDP_PROXY -d ${WG_NETWORK_CIDR} -j RETURN
 -A WG_UDP_PROXY -d ${RESIDENTIAL_PROXY_IP}/32 -j RETURN
+EOF
+
+    if dns_forwarding_without_udp_relay; then
+        cat <<EOF
+-A WG_UDP_PROXY -p udp --dport 53 -j RETURN
+EOF
+    fi
+
+    cat <<EOF
 -A WG_UDP_PROXY -p udp -j TPROXY --on-port ${RESIDENTIAL_PROXY_UDP_LOCAL_PORT} --tproxy-mark 0x1/0x1
 -A PREROUTING -i ${WG_INTERFACE} -s ${WG_NETWORK_CIDR} -p udp -j WG_UDP_PROXY
 EOF

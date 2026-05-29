@@ -30,6 +30,7 @@ Na EC2 uruchom:
 
 ```bash
 sudo iptables -t mangle -S WG_UDP_PROXY
+sudo iptables -S INPUT | grep -- '--mark 0x1/0x1'
 ip rule show
 ip route show table 100
 ```
@@ -37,6 +38,7 @@ ip route show table 100
 Oczekiwany wynik:
 
 - istnieje chain `WG_UDP_PROXY`,
+- `INPUT` przepuszcza pakiety z `mark 0x1/0x1`,
 - istnieje wpis `fwmark 0x1/0x1 lookup 100`,
 - tabela `100` ma `local 0.0.0.0/0 dev lo`.
 
@@ -68,28 +70,28 @@ Z klienta za WireGuard wygeneruj ruch UDP, na przyklad:
 W tym samym czasie na EC2 uruchom:
 
 ```bash
-UPLINK_IFACE="$(ip route show default | awk '/default/ {print $5; exit}')"
-sudo tcpdump -ni "${UPLINK_IFACE}" udp and not port 51820
+sudo journalctl -u wg-residential-udp-relay.service -f --no-pager
 ```
 
-Oczekiwany wynik bez leaku:
+Oczekiwany wynik bez leaku i z poprawnym routingiem przez proxy:
 
-- widzisz ruch UDP z EC2 tylko do adresu i portu upstream proxy,
-- nie widzisz bezposrednich pakietow UDP do losowych hostow internetowych.
+- widzisz `inbound/tproxy[tproxy-udp-in]: inbound packet connection to X:53`,
+- widzisz `router: match[...] => route(residential-socks5)`,
+- widzisz `outbound/socks[residential-socks5]: outbound packet connection to X:53`.
 
-Jesli widzisz pakiety UDP bezposrednio do docelowych hostow, to jest leak i trzeba zatrzymac test.
+To jest bardziej wiarygodne niz sam `tcpdump`, bo przy `sing-box` + `SOCKS5 UDP ASSOCIATE` sam obraz socketow i pakietow na EC2 moze byc mylacy.
 
 ## 5. Jak odroznic timeout od leaku
 
-Sytuacja A: klient ma timeout, a na uplinku EC2 nie ma zadnego UDP do upstream proxy.
+Sytuacja A: klient ma timeout, a `journalctl` nie pokazuje zadnych wpisow `inbound/tproxy`.
 
-Wniosek: relay nie pracuje albo `TPROXY` nie przechwytuje pakietow.
+Wniosek: relay nie pracuje, `TPROXY` nie przechwytuje pakietow albo firewall nadal blokuje pakiety z `mark 0x1/0x1` przed lokalnym socketem relay.
 
-Sytuacja B: klient ma timeout, ale na uplinku EC2 widzisz UDP tylko do upstream proxy.
+Sytuacja B: klient ma timeout, ale `journalctl` pokazuje `inbound/tproxy` i `outbound/socks` dla tego samego celu.
 
 Wniosek: brak leaku; problem jest dalej, najczesciej w relay, configu `sing-box` albo po stronie providera `SOCKS5 UDP ASSOCIATE`.
 
-Sytuacja C: klient dziala, a na uplinku EC2 widzisz UDP do innych hostow niz upstream proxy.
+Sytuacja C: klient dziala, a `journalctl` nie pokazuje `route(residential-socks5)` albo wiesz, ze ruch wychodzi z AWS poza torem `sing-box`.
 
 Wniosek: to nie jest poprawny stan; ruch obchodzi proxy.
 

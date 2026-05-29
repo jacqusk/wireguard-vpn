@@ -246,7 +246,6 @@ server_address_ip() {
 
 client_template_dns_line() {
     local peer_dns
-    local dns_value
 
     peer_dns="$1"
 
@@ -254,15 +253,7 @@ client_template_dns_line() {
         return 0
     fi
 
-    dns_value="${peer_dns}"
-
-    # In http-connect mode, force DNS to the configured upstream IP
-    # Client connects directly, server only forwards the traffic
-    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        dns_value="${RESIDENTIAL_DNS_UPSTREAM_IP}"
-    fi
-
-    printf 'DNS = %s\n' "${dns_value}"
+    printf 'DNS = %s\n' "${peer_dns}"
 }
 
 validate_peer_definitions() {
@@ -823,8 +814,12 @@ print_summary() {
     echo "Egress helper: ${EGRESS_HELPER_TARGET_FILE}"
     echo "Firewall config: /etc/default/wireguard-firewall"
     echo "Egress config: ${EGRESS_ENV_FILE}"
-    if [[ "${EGRESS_MODE}" == "residential-proxy" && "${RESIDENTIAL_PROXY_TYPE}" == "http-connect" && "${ENABLE_SOCKS5_UDP_SUPPORT}" != "true" ]]; then
-        echo "DNS note: client DNS is set to ${RESIDENTIAL_DNS_UPSTREAM_IP} (forwarded by server, not proxied)."
+    if [[ "${EGRESS_MODE}" == "residential-proxy" ]]; then
+        if [[ "${ENABLE_SOCKS5_UDP_SUPPORT}" == "true" ]]; then
+            echo "DNS note: client DNS is preserved; configured resolvers use the proxy path, blank DNS keeps client-side leak behavior."
+        else
+            echo "DNS note: client DNS is preserved; configured resolvers are forwarded directly from AWS, blank DNS keeps client-side leak behavior."
+        fi
         echo "Proxy note: a health timer checks the local transparent proxy every 30 seconds."
     fi
     echo

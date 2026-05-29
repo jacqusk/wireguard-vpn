@@ -119,7 +119,8 @@ Po poprawnym uruchomieniu:
 - `wireguard-egress status` pokazuje gotowy config relay,
 - `wg-residential-udp-relay.service` jest `active`,
 - firewall ma `WG_UDP_PROXY`,
-- istnieje `ip rule` dla `fwmark 0x1/0x1`.
+- istnieje `ip rule` dla `fwmark 0x1/0x1`,
+- `INPUT` akceptuje pakiety UDP z `mark 0x1/0x1`, zeby `TPROXY`-owany ruch mogl dojsc do lokalnego socketu relay.
 
 ## 6. Co z automatycznym startem po restarcie EC2
 

@@ -22,6 +22,7 @@
       "version": "5",
       "username": "UPSTREAM_USERNAME",
       "password": "UPSTREAM_PASSWORD",
+      "network": "udp",
       "udp_over_tcp": false
     },
     {
